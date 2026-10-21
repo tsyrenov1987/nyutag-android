@@ -40,7 +40,7 @@ data class StateEntry(val stateKey: String, val sender: String?, val content: Js
 
 /** Хранилище на SQLite. Один писатель: все вызовы под общим замком. */
 class Store(val db: Sql) : AutoCloseable {
-    private val lock = Any()
+    internal val lock = Any()
 
     /** Сквозной порядок событий таймлайна: события из /sync идут в хронологии получения, события из `/messages` в прошлое. */
     private var nextOrdering: Long = 0

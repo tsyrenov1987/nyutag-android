@@ -6,7 +6,23 @@ import chat.nyutag.core.media.Attachment
 import chat.nyutag.core.media.EncryptedFile
 import chat.nyutag.core.media.EncryptedFileKey
 import chat.nyutag.core.media.MXC
+import chat.nyutag.core.media.MediaCache
+import chat.nyutag.core.media.ThumbnailMethod
+import chat.nyutag.core.media.downloadDecrypted
+import chat.nyutag.core.media.downloadMedia
+import chat.nyutag.core.media.mediaUploadLimit
+import chat.nyutag.core.media.uploadEncrypted
+import chat.nyutag.core.media.uploadMedia
+import chat.nyutag.core.net.MatrixClient
+import chat.nyutag.crypto.CryptoException
 import chat.nyutag.json.JsonValue
+import java.io.File
+import java.net.URI
+import java.nio.file.Files
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -105,5 +121,86 @@ class MediaTest {
         assertFalse(read.isImage)
         assertNull(Attachment.read(JsonValue.parse("""{"msgtype":"m.image","body":"x"}""")))
         assertNull(Attachment.read(JsonValue.parse("""{"msgtype":"m.text","body":"x","url":"mxc://s/G"}""")))
+    }
+
+    private fun tempDir(): File = Files.createTempDirectory("nyutag-media").toFile()
+
+    @Test fun cacheKeysDifferBySize() {
+        val mxc = MXC.parse("mxc://x/y")!!
+        val full = MediaCache.key(mxc, null)
+        assertEquals(64, full.length)
+        val small = MediaCache.key(mxc, MediaCache.Size(96, 96))
+        assertTrue(full != small)
+        assertTrue(small != MediaCache.key(mxc, MediaCache.Size(320, 320)))
+        assertTrue(small != MediaCache.key(mxc, MediaCache.Size(96, 96), ThumbnailMethod.CROP))
+        assertEquals(full, MediaCache.key(mxc, null, ThumbnailMethod.CROP))
+    }
+
+    @Test fun cacheEvictsOldestOverLimit() = runBlocking {
+        val dir = tempDir()
+        try {
+            // Сервер по адресу :9 не отвечает: всё, что читается, берётся из кэша.
+            val cache = MediaCache(MatrixClient(URI("http://127.0.0.1:9")), dir, byteLimit = 250)
+            cache.store(ByteArray(100) { 1 }, MXC.parse("mxc://x/a")!!)
+            File(dir, MediaCache.key(MXC.parse("mxc://x/a")!!, null)).setLastModified(System.currentTimeMillis() - 60_000)
+            cache.store(ByteArray(100) { 2 }, MXC.parse("mxc://x/b")!!)
+            assertEquals(200, cache.totalBytes())
+            cache.store(ByteArray(100) { 3 }, MXC.parse("mxc://x/c")!!)
+            assertTrue(cache.totalBytes() <= 250)
+            assertFalse(File(dir, MediaCache.key(MXC.parse("mxc://x/a")!!, null)).exists())
+            assertEquals(3.toByte(), cache.data(MXC.parse("mxc://x/c")!!).first())
+            cache.clear()
+            assertEquals(0, cache.totalBytes())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test fun uploadAndDownload() = runBlocking {
+        val server = FakeHomeserver()
+        val client = server.client(server.session(ALICE, "A1"))
+        val mxc = client.uploadMedia("снимок".toByteArray(), "image/jpeg", "photo.jpg")
+        assertEquals("nyutag.chat", mxc.server)
+        assertEquals("image/jpeg", server.mediaTypes[mxc.mediaID])
+        assertEquals("снимок", String(client.downloadMedia(mxc)))
+        assertEquals(50_000_000, client.mediaUploadLimit())
+    }
+
+    @Test fun encryptedUploadLeavesOnlyCiphertext() = runBlocking {
+        val server = FakeHomeserver()
+        val client = server.client(server.session(ALICE, "A1"))
+        val secret = "тайный снимок".toByteArray()
+        val file = client.uploadEncrypted(secret)
+        val id = requireNotNull(file.mxc).mediaID
+        assertEquals("application/octet-stream", server.mediaTypes[id])
+        assertFalse(server.media[id]!!.contentEquals(secret))
+        assertArrayEquals(secret, client.downloadDecrypted(file))
+        // Сервер подменил файл: расшифровки нет.
+        server.media[id] = server.media[id]!!.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        assertEquals(CryptoException.BadMAC, runCatching { client.downloadDecrypted(file) }.exceptionOrNull())
+    }
+
+    @Test fun cacheKeepsCiphertextAndDownloadsOnce() = runBlocking {
+        val server = FakeHomeserver()
+        val client = server.client(server.session(ALICE, "A1"))
+        val dir = tempDir()
+        try {
+            val cache = MediaCache(client, dir)
+            val secret = "в кэше только шифртекст".toByteArray()
+            val file = client.uploadEncrypted(secret)
+            val results = List(5) { async { cache.decrypted(file) } }.awaitAll()
+            results.forEach { assertArrayEquals(secret, it) }
+            assertEquals(1, server.mediaRequests.size)
+            val onDisk = File(dir, MediaCache.key(file.mxc!!, null)).readBytes()
+            assertArrayEquals(server.media[file.mxc!!.mediaID], onDisk)
+            assertFalse(onDisk.contentEquals(secret))
+
+            // Миниатюра — свой ключ кэша и свой запрос с размерами.
+            cache.data(file.mxc!!, MediaCache.Size(96, 96), ThumbnailMethod.CROP)
+            assertEquals(2, server.mediaRequests.size)
+            assertTrue(server.mediaRequests.last().contains("thumbnail") && server.mediaRequests.last().contains("method=crop"))
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

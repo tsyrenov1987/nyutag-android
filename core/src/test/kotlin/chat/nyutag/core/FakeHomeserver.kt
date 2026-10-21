@@ -45,6 +45,11 @@ class FakeHomeserver : Transport {
     private var loginCount = 0
     private val pusherTable = HashMap<String, HashMap<String, JsonValue>>()
     private val pushRules = HashMap<String, JsonValue>()
+    /** Загруженные файлы по идентификатору, их Content-Type и пути скачиваний по порядку. */
+    val media = HashMap<String, ByteArray>()
+    val mediaTypes = HashMap<String, String>()
+    val mediaRequests = ArrayList<String>()
+    private var nextMedia = 0
 
     fun session(user: String, device: String): Session {
         val token = "tok-$user-$device"
@@ -83,6 +88,7 @@ class FakeHomeserver : Transport {
 
     override suspend fun send(request: HttpRequest): HttpResponse {
         val url = request.url
+        mediaResponse(request)?.let { return it }
         // /_matrix/client/v3/<путь>
         val path = url.rawPath.split("/").filter { it.isNotEmpty() }.drop(3).map { URLDecoder.decode(it, "UTF-8") }
         val query = HashMap<String, String>()
@@ -97,6 +103,36 @@ class FakeHomeserver : Transport {
         val token = request.header("Authorization")?.removePrefix("Bearer ")
         val (status, json) = handle(request.method, path, query, body, token)
         return HttpResponse(status, mapOf("Content-Type" to listOf("application/json")), json.compact().toByteArray(Charsets.UTF_8))
+    }
+
+    /** Медиа: тела не JSON, поэтому мимо [handle]. */
+    private fun mediaResponse(request: HttpRequest): HttpResponse? {
+        val path = request.url.rawPath
+        fun json(status: Int, value: JsonValue) =
+            HttpResponse(status, mapOf("Content-Type" to listOf("application/json")), value.compact().toByteArray(Charsets.UTF_8))
+        val user = request.header("Authorization")?.removePrefix("Bearer ")?.let { synchronized(lock) { tokens[it] } }
+        if (path == "/_matrix/media/v3/upload" || path.startsWith("/_matrix/client/v1/media/")) {
+            if (user == null) return json(401, JsonValue.of("errcode" to "M_MISSING_TOKEN", "error" to "нет токена"))
+        } else {
+            return null
+        }
+        if (request.method == "POST" && path == "/_matrix/media/v3/upload") {
+            val id = "m" + synchronized(lock) { ++nextMedia }
+            synchronized(lock) {
+                media[id] = request.body ?: ByteArray(0)
+                mediaTypes[id] = request.header("Content-Type") ?: ""
+            }
+            return json(200, JsonValue.of("content_uri" to "mxc://nyutag.chat/$id"))
+        }
+        if (path == "/_matrix/client/v1/media/config") return json(200, JsonValue.of("m.upload.size" to 50_000_000))
+        val parts = path.removePrefix("/_matrix/client/v1/media/").split("/")
+        if (parts.size == 3 && (parts[0] == "download" || parts[0] == "thumbnail")) {
+            synchronized(lock) { mediaRequests.add(path + (request.url.rawQuery?.let { "?$it" } ?: "")) }
+            val bytes = synchronized(lock) { media[parts[2]] }
+                ?: return json(404, JsonValue.of("errcode" to "M_NOT_FOUND", "error" to "нет файла"))
+            return HttpResponse(200, mapOf("Content-Type" to listOf("application/octet-stream")), bytes)
+        }
+        return json(404, JsonValue.of("errcode" to "M_UNRECOGNIZED", "error" to path))
     }
 
     private fun error(status: Int, errcode: String, message: String) = status to JsonValue.of("errcode" to errcode, "error" to message)

@@ -36,6 +36,8 @@ class FakeHomeserver : Transport {
     private val deviceNames = HashMap<String, String>()
     data class Report(val user: String, val roomID: String, val eventID: String, val reason: String, val score: Int)
     val reports = ArrayList<Report>()
+    /** Тела запросов `/createRoom` по порядку. */
+    val createdRooms = ArrayList<JsonValue>()
     private val crossSigning = HashMap<String, HashMap<String, JsonValue>>()
     var requirePassword: String? = null
     var tamperDeviceKeys: ((String, String, JsonValue) -> JsonValue)? = null
@@ -296,6 +298,12 @@ class FakeHomeserver : Transport {
                     "room_id" to p[1], "content" to (body ?: JsonValue.Obj(emptyMap())),
                 )
                 return 200 to JsonValue.of("event_id" to eventID)
+            }
+            method == "POST" && p == listOf("createRoom") -> {
+                createdRooms.add(body ?: JsonValue.Obj(emptyMap()))
+                val roomID = "!new:nyutag.chat"
+                members[roomID] = setOf(user) + ((body?.get("invite")?.array ?: emptyList()).mapNotNull { it.string })
+                return 200 to JsonValue.of("room_id" to roomID)
             }
             method == "PUT" && p.size == 4 && p[0] == "user" && p[2] == "account_data" -> {
                 if (p[1] != user) return error(403, "M_FORBIDDEN", "чужой")

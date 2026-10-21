@@ -1,0 +1,16 @@
+# Сборка
+.gradle/
+build/
+.kotlin/
+*.apk
+*.aab
+local.properties
+
+# Секреты: ключ двери и адреса дверей лежат только локально (образец рядом: *.example)
+app/src/main/assets/nyutag-catalogue.txt
+tools/test-env.local.sh
+
+# Системное
+.DS_Store
+.idea/
+*.iml

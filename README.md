@@ -1,0 +1,33 @@
+# Нютаг для Android
+
+Мессенджер для бурятского сообщества: сервер `nyutag.chat` (протокол Matrix), вход по приглашению, интерфейс на бурятском и русском.
+
+Клиент пишется с нуля на Kotlin, как и версия для iOS (`tsyrenov1987/nyutag-ios`). Сторонних библиотек нет:
+только Android SDK, Jetpack Compose и стандартная библиотека Java (`javax.crypto`, `java.math.BigInteger`, `HttpsURLConnection`, SQLite из состава ОС).
+К ядру клиент ходит обычным HTTPS через «двери» — несколько адресов с сертификатами Let's Encrypt.
+
+## Состав
+
+| Модуль | Что делает |
+| --- | --- |
+| `crypto` | Сквозное шифрование: своя реализация Olm и Megolm, Curve25519/Ed25519 на `BigInteger`, SSSS, бэкап ключей, SAS. Чистый Kotlin/JVM, тесты против эталона vodozemac (`src/test/resources/interop.json`, общий с iOS) |
+| `core` | HTTP-слой клиент-серверного API, вход, `/sync`, хранилище, события комнат, двери к ядру (в работе) |
+| `app` | Приложение на Compose (в работе) |
+
+Состояние Olm-сессий и аккаунта пишется в том же JSON, что у iOS-клиента, поэтому тестовые данные у двух клиентов общие.
+
+## Сборка и тесты
+
+Нужен JDK 21; на Маке подходит JBR из Android Studio:
+
+```sh
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+./gradlew :crypto:test
+./gradlew :app:assembleDebug
+```
+
+Ключ двери и адреса дверей в репозиторий не входят (`app/src/main/assets/nyutag-catalogue.txt`, `tools/test-env.local.sh` в `.gitignore`).
+
+## Лицензия
+
+Код открыт для чтения, права принадлежат автору. См. `LICENSE`.

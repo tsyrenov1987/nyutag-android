@@ -26,6 +26,7 @@ import chat.nyutag.core.rooms.TransactionID
 import chat.nyutag.core.rooms.backfill
 import chat.nyutag.core.rooms.join
 import chat.nyutag.core.rooms.send
+import chat.nyutag.core.rooms.setDisplayName
 import chat.nyutag.core.rooms.setReadMarkers
 import chat.nyutag.core.rooms.setTyping
 import chat.nyutag.core.store.RoomRecord
@@ -101,13 +102,16 @@ class AppSession(context: Context, private val doors: DoorHub) {
         }
     }
 
-    /** Вход по имени, телефону или почте. Телефон и почту сервер Нютага переводит в Matrix ID. */
-    suspend fun signIn(identifier: String, password: String) {
+    /** Вход по имени, телефону или почте. Телефон и почту сервер Нютага переводит в Matrix ID.
+     *  `displayName` — имя нового участника сразу после регистрации: ставим его в профиль до первого /sync. */
+    suspend fun signIn(identifier: String, password: String, displayName: String? = null) {
         val typed = identifier.trim()
         if (!doors.waitUntilUp()) throw SignInException(SignInFailure.NO_NETWORK)
         val signed = try {
             val user = if (needsResolve(typed)) NyutagService(doors.makeClient()).resolve(typed, password) else typed
-            withContext(Dispatchers.IO) { keeper.signIn(DoorHub.CORE, user, password, deviceName) }
+            withContext(Dispatchers.IO) { keeper.signIn(DoorHub.CORE, user, password, deviceName) }.also { account ->
+                if (displayName != null) runCatching { account.client.setDisplayName(account.session.userID, displayName) }
+            }
         } catch (e: MatrixError) {
             log("отказ входа: $e")
             throw SignInException(failure(e))

@@ -1,4 +1,4 @@
-// Нютаг. Единственное окно: язык → вход → чаты → переписка. Навигация — простое состояние и «назад».
+// Нютаг. Единственное окно: язык → вход (или регистрация, сброс пароля) → чаты → переписка. Навигация — простое состояние и «назад».
 
 package chat.nyutag.messenger
 
@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,7 +26,9 @@ import chat.nyutag.messenger.ui.LanguageScreen
 import chat.nyutag.messenger.ui.LocalPalette
 import chat.nyutag.messenger.ui.LocalWords
 import chat.nyutag.messenger.ui.NyutagTheme
+import chat.nyutag.messenger.ui.PasswordResetScreen
 import chat.nyutag.messenger.ui.SignInScreen
+import chat.nyutag.messenger.ui.SignUpScreen
 import chat.nyutag.messenger.ui.Words
 
 class MainActivity : ComponentActivity() {
@@ -42,13 +45,20 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(LocalWords provides words) {
                     val phase by session.phase.collectAsState()
                     var openRoom by rememberSaveable { mutableStateOf<String?>(null) }
+                    // Без входа: форма входа, регистрация или сброс пароля.
+                    var entry by rememberSaveable { mutableStateOf(Entry.SIGN_IN) }
+                    LaunchedEffect(phase) { if (phase == AppSession.Phase.SIGNED_IN) entry = Entry.SIGN_IN }
                     when {
                         words.lang == null -> LanguageScreen(words)
                         phase == AppSession.Phase.LAUNCHING ->
                             Box(Modifier.fillMaxSize().background(LocalPalette.current.milk), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator()
                             }
-                        phase == AppSession.Phase.SIGNED_OUT -> SignInScreen(session)
+                        phase == AppSession.Phase.SIGNED_OUT -> when (entry) {
+                            Entry.SIGN_IN -> SignInScreen(session, onSignUp = { entry = Entry.SIGN_UP }, onReset = { entry = Entry.RESET })
+                            Entry.SIGN_UP -> SignUpScreen(session, app.doors) { entry = Entry.SIGN_IN }
+                            Entry.RESET -> PasswordResetScreen(session, app.doors) { entry = Entry.SIGN_IN }
+                        }
                         openRoom != null -> ChatScreen(session, openRoom!!) { openRoom = null }
                         else -> ChatListScreen(session) { openRoom = it }
                     }
@@ -56,6 +66,8 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private enum class Entry { SIGN_IN, SIGN_UP, RESET }
 
     override fun onStart() {
         super.onStart()

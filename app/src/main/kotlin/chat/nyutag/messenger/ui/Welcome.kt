@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,7 +36,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -73,11 +73,10 @@ fun LanguageScreen(words: Words) {
 }
 
 @Composable
-fun SignInScreen(session: AppSession) {
+fun SignInScreen(session: AppSession, onSignUp: () -> Unit, onReset: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
-    val uri = LocalUriHandler.current
     var identifier by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -134,11 +133,12 @@ fun SignInScreen(session: AppSession) {
                 AppSession.SignInFailure.NO_NETWORK, AppSession.SignInFailure.BROKEN -> words(P.noNetwork)
             })
         }
-        // Сброс пароля и регистрация в приложении — следующим шагом; пока ведут на сайт.
         Text(words(P.forgotPassword), color = palette.sky, fontSize = 15.sp, textAlign = TextAlign.End,
-             modifier = Modifier.fillMaxWidth().clickable { uri.openUri("https://nyutag.chat/") })
+             modifier = Modifier.fillMaxWidth().clickable(onClick = onReset))
         BigButton(if (busy) words(P.signingIn) else words(P.signIn), busy, canSubmit, ::submit)
-        Text(words(P.noAccount) + " " + words(P.signUp), color = palette.quiet, fontSize = 15.sp, textAlign = TextAlign.Center,
-             modifier = Modifier.fillMaxWidth().clickable { uri.openUri("https://nyutag.chat/") })
+        Row(Modifier.fillMaxWidth().clickable(onClick = onSignUp).padding(vertical = 6.dp), horizontalArrangement = Arrangement.Center) {
+            Text(words(P.noAccount) + " ", color = palette.quiet, fontSize = 15.sp)
+            Text(words(P.signUp), color = palette.sky, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }

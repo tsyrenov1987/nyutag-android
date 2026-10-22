@@ -4,9 +4,13 @@
 
 package chat.nyutag.messenger.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,7 +32,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -54,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
 import chat.nyutag.core.rooms.TransactionID
+import chat.nyutag.messenger.BuildConfig
 import chat.nyutag.messenger.session.AppSession
 import java.time.Instant
 import java.time.LocalDate
@@ -63,7 +74,20 @@ import kotlinx.coroutines.launch
 
 /** Своя реплика до прихода с сервера. `eventID` — когда сервер принял: ждём её в ленте. */
 private data class Outgoing(val transactionID: String, val text: String, val ts: Long,
-                            val eventID: String? = null, val failed: Boolean = false)
+                            val eventID: String? = null, val failed: Boolean = false,
+                            val replyTo: String? = null, val quote: Pair<String, String>? = null)
+
+/** Что можно сделать с репликой из меню долгого нажатия. */
+private sealed class Action {
+    object Reply : Action()
+    object Copy : Action()
+    object Edit : Action()
+    object Delete : Action()
+    data class React(val key: String) : Action()
+}
+
+/** Быстрые реакции в меню, по порядку, как на iOS. */
+private val quickReactions = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
 @Composable
 fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
@@ -84,6 +108,11 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var lastRead by remember(roomID) { mutableStateOf<String?>(null) }
     var typingSentAt by remember(roomID) { mutableStateOf(0L) }
     var typingLine by remember(roomID) { mutableStateOf<String?>(null) }
+    var replyTo by remember(roomID) { mutableStateOf<FeedItem?>(null) }
+    var editing by remember(roomID) { mutableStateOf<FeedItem?>(null) }
+    var deleting by remember(roomID) { mutableStateOf<FeedItem?>(null) }
+    var failed by remember(roomID) { mutableStateOf(false) }
+    val context = LocalContext.current
     val listState = rememberLazyListState()
 
     LaunchedEffect(roomID, revision, limit) {
@@ -126,12 +155,14 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             }
     }
 
-    fun send(text: String, transactionID: String = TransactionID.make()) {
+    fun send(text: String, transactionID: String = TransactionID.make(), reply: FeedItem? = null,
+             retry: Outgoing? = null) {
         val index = outbox.indexOfFirst { it.transactionID == transactionID }
-        val pending = Outgoing(transactionID, text, System.currentTimeMillis())
+        val pending = Outgoing(transactionID, text, System.currentTimeMillis(),
+                               replyTo = reply?.id ?: retry?.replyTo, quote = reply?.let { quoteOf(it, words) } ?: retry?.quote)
         if (index >= 0) outbox[index] = pending else outbox.add(pending)
         scope.launch {
-            val eventID = session.sendText(roomID, text, transactionID)
+            val eventID = session.sendText(roomID, text, transactionID, pending.replyTo)
             val at = outbox.indexOfFirst { it.transactionID == transactionID }
             if (at < 0) return@launch
             when {
@@ -139,6 +170,25 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                 items.any { it.id == eventID } -> outbox.removeAt(at)
                 else -> outbox[at] = outbox[at].copy(eventID = eventID)
             }
+        }
+    }
+
+    /** Сервер не принял правку, удаление или реакцию: короткое «не получилось». */
+    fun run(what: String, block: suspend () -> Boolean) {
+        scope.launch {
+            val ok = block()
+            if (!ok) failed = true
+            if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "$what ${if (ok) "ушло" else "не прошло"}")
+        }
+    }
+
+    fun act(action: Action, item: FeedItem) {
+        when (action) {
+            Action.Reply -> { editing = null; replyTo = item }
+            Action.Copy -> (item.body as? FeedItem.Body.Text)?.let { copyText(context, it.text) }
+            Action.Edit -> (item.body as? FeedItem.Body.Text)?.let { replyTo = null; editing = item; draft = it.text }
+            Action.Delete -> deleting = item
+            is Action.React -> run("реакция ${action.key}") { session.toggleReaction(roomID, item, action.key) }
         }
     }
 
@@ -156,14 +206,22 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             items(rows.asReversed(), key = { it.key }) { row ->
                 when (row) {
                     is Row.Plate -> Plate(row.text)
-                    is Row.Bubble -> Bubble(row) { row.retry?.let { (tx, text) -> send(text, tx) } }
+                    is Row.Bubble -> Bubble(row, onRetry = {
+                        row.retry?.let { (tx, text) -> send(text, tx, retry = outbox.firstOrNull { it.transactionID == tx }) }
+                    }, onAction = { action -> row.item?.let { act(action, it) } })
                 }
             }
         }
-        Composer(draft, onChange = { text ->
+        editing?.let { item ->
+            ComposerBanner("✎ " + words(P.editing), summary(item, words)) { editing = null; draft = "" }
+        } ?: replyTo?.let { item ->
+            ComposerBanner(item.senderName, summary(item, words)) { replyTo = null }
+        }
+        val old = (editing?.body as? FeedItem.Body.Text)?.text
+        Composer(draft, editing = editing != null, ready = draft.isNotBlank() && draft.trim() != old, onChange = { text ->
             draft = text
             val now = System.currentTimeMillis()
-            if (text.isNotBlank() && now - typingSentAt > 8_000) {
+            if (editing == null && text.isNotBlank() && now - typingSentAt > 8_000) {
                 typingSentAt = now
                 scope.launch { session.setTyping(roomID, true) }
             }
@@ -171,10 +229,32 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             val text = draft.trim()
             if (text.isEmpty()) return@Composer
             draft = ""
+            val target = editing
+            if (target != null) {
+                editing = null
+                if (text != old) run("правка") { session.edit(roomID, target.id, text) }
+                return@Composer
+            }
             typingSentAt = 0
             scope.launch { session.setTyping(roomID, false) }
-            send(text)
+            val reply = replyTo
+            replyTo = null
+            send(text, reply = reply)
         })
+    }
+    deleting?.let { item ->
+        AlertDialog(onDismissRequest = { deleting = null },
+                    title = { Text(words(P.deleteAsk)) },
+                    confirmButton = {
+                        TextButton({ deleting = null; run("удаление") { session.delete(roomID, item.id) } }) {
+                            Text(words(P.deleteAction), color = Color(0xFFD03A2F))
+                        }
+                    },
+                    dismissButton = { TextButton({ deleting = null }) { Text(words(P.cancel), color = palette.sky) } })
+    }
+    if (failed) {
+        AlertDialog(onDismissRequest = { failed = false }, title = { Text(words(P.cantDo)) },
+                    confirmButton = { TextButton({ failed = false }) { Text(words(P.done), color = palette.sky) } })
     }
 }
 
@@ -218,6 +298,8 @@ private sealed class Row(val key: String) {
         val pending: Boolean = false,
         val failed: Boolean = false,
         val retry: Pair<String, String>? = null,
+        /** Реплика из ленты: по ней меню долгого нажатия. У очереди отправки её нет. */
+        val item: FeedItem? = null,
     ) : Row(key)
 }
 
@@ -260,13 +342,13 @@ private fun layout(items: List<FeedItem>, outbox: List<Outgoing>, line: ChatLine
             text = text, muted = muted, quote = item.reply?.let { it.senderName to kindLabel(it.preview, words) },
             forwarded = item.forwarded, edited = item.edited, time = clock(item.ts),
             delivery = if (!item.isMine) ChatLine.Delivery.NONE else if (item.isRead) ChatLine.Delivery.READ else ChatLine.Delivery.SENT,
-            reactions = item.reactions,
+            reactions = item.reactions, item = item.takeIf { body != FeedItem.Body.Deleted },
         )
     }
     for (out in outbox) {
         day(out.ts)
         rows += Row.Bubble(
-            key = "tx-${out.transactionID}", mine = true, author = null, text = out.text, muted = false, quote = null,
+            key = "tx-${out.transactionID}", mine = true, author = null, text = out.text, muted = false, quote = out.quote,
             forwarded = false, edited = false, time = if (out.failed) words(P.notSent) else clock(out.ts),
             delivery = ChatLine.Delivery.NONE, reactions = emptyList(), pending = !out.failed, failed = out.failed,
             retry = if (out.failed) out.transactionID to out.text else null,
@@ -311,9 +393,10 @@ private fun Plate(text: String) {
 }
 
 @Composable
-private fun Bubble(row: Row.Bubble, onRetry: () -> Unit) {
+private fun Bubble(row: Row.Bubble, onRetry: () -> Unit, onAction: (Action) -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
+    var menu by remember { mutableStateOf(false) }
     val ink = if (row.mine) Color.White else palette.ink
     val quiet = if (row.mine) Color.White.copy(alpha = 0.72f) else palette.quiet
     Column(Modifier.fillMaxWidth().padding(top = if (row.author != null) 8.dp else 2.dp, bottom = 2.dp),
@@ -321,29 +404,34 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit) {
         row.author?.let {
             Text(it, color = palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 12.dp, bottom = 2.dp))
         }
-        Column(Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp))
-                   .background(if (row.mine) palette.mine.copy(alpha = if (row.pending) 0.8f else 1f) else palette.card)
-                   .clickable(enabled = row.failed, onClick = onRetry)
-                   .padding(horizontal = 12.dp, vertical = 7.dp)) {
-            if (row.forwarded) Text(words(P.forwarded), color = quiet, fontSize = 12.sp)
-            row.quote?.let { (name, preview) ->
-                Row(Modifier.padding(bottom = 4.dp).clip(RoundedCornerShape(8.dp))
-                        .background(if (row.mine) Color.White.copy(alpha = 0.14f) else palette.plate.copy(alpha = 0.6f))) {
-                    Box(Modifier.width(3.dp).heightIn(min = 34.dp).background(if (row.mine) Color.White else palette.sky))
-                    Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp)) {
-                        Text(name, color = if (row.mine) Color.White else palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                        Text(preview, color = quiet, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box {
+            Column(Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp))
+                       .background(if (row.mine) palette.mine.copy(alpha = if (row.pending) 0.8f else 1f) else palette.card)
+                       .combinedClickable(enabled = row.failed || row.item != null,
+                                          onLongClick = if (row.item != null) ({ menu = true }) else null,
+                                          onClick = { if (row.failed) onRetry() })
+                       .padding(horizontal = 12.dp, vertical = 7.dp)) {
+                if (row.forwarded) Text(words(P.forwarded), color = quiet, fontSize = 12.sp)
+                row.quote?.let { (name, preview) ->
+                    Row(Modifier.padding(bottom = 4.dp).clip(RoundedCornerShape(8.dp))
+                            .background(if (row.mine) Color.White.copy(alpha = 0.14f) else palette.plate.copy(alpha = 0.6f))) {
+                        Box(Modifier.width(3.dp).heightIn(min = 34.dp).background(if (row.mine) Color.White else palette.sky))
+                        Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp)) {
+                            Text(name, color = if (row.mine) Color.White else palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            Text(preview, color = quiet, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
+                Text(row.text, color = if (row.muted) quiet else ink, fontSize = 16.sp,
+                     fontStyle = if (row.muted) androidx.compose.ui.text.font.FontStyle.Italic else null)
+                Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (row.edited) Text(words(P.edited), color = quiet, fontSize = 11.sp)
+                    Text(row.time, color = if (row.failed) palette.gold else quiet, fontSize = 11.sp)
+                    if (row.pending) Text("🕓", fontSize = 10.sp)
+                    if (row.mine) Ticks(row.delivery, color = quiet, readColor = palette.readOnBlue)
+                }
             }
-            Text(row.text, color = if (row.muted) quiet else ink, fontSize = 16.sp,
-                 fontStyle = if (row.muted) androidx.compose.ui.text.font.FontStyle.Italic else null)
-            Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (row.edited) Text(words(P.edited), color = quiet, fontSize = 11.sp)
-                Text(row.time, color = if (row.failed) palette.gold else quiet, fontSize = 11.sp)
-                if (row.pending) Text("🕓", fontSize = 10.sp)
-                if (row.mine) Ticks(row.delivery, color = quiet, readColor = palette.readOnBlue)
-            }
+            row.item?.let { item -> MessageMenu(menu, item, { menu = false }) { menu = false; onAction(it) } }
         }
         if (row.reactions.isNotEmpty()) {
             Row(Modifier.padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -351,6 +439,7 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit) {
                     Text("${reaction.key} ${reaction.count}", fontSize = 13.sp, color = palette.ink,
                          modifier = Modifier.clip(RoundedCornerShape(12.dp))
                              .background(if (reaction.mine) palette.sky.copy(alpha = 0.18f) else palette.card)
+                             .clickable(enabled = row.item != null) { onAction(Action.React(reaction.key)) }
                              .padding(horizontal = 8.dp, vertical = 2.dp))
                 }
             }
@@ -359,7 +448,7 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun Composer(text: String, onChange: (String) -> Unit, onSend: () -> Unit) {
+private fun Composer(text: String, editing: Boolean, ready: Boolean, onChange: (String) -> Unit, onSend: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().background(palette.card).padding(horizontal = 10.dp, vertical = 8.dp),
@@ -370,11 +459,65 @@ private fun Composer(text: String, onChange: (String) -> Unit, onSend: () -> Uni
                            textStyle = TextStyle(color = palette.ink, fontSize = 16.sp), cursorBrush = SolidColor(palette.sky),
                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences))
         }
-        val ready = text.isNotBlank()
         Box(Modifier.size(42.dp).clip(CircleShape).background(if (ready) palette.sky else palette.sky.copy(alpha = 0.4f))
                 .clickable(enabled = ready, onClick = onSend),
             contentAlignment = Alignment.Center) {
-            Text("➤", color = Color.White, fontSize = 18.sp)
+            Text(if (editing) "✓" else "➤", color = Color.White, fontSize = 18.sp)
         }
     }
+}
+
+/** Меню долгого нажатия: ряд быстрых реакций, ниже действия. */
+@Composable
+private fun MessageMenu(expanded: Boolean, item: FeedItem, onDismiss: () -> Unit, onAction: (Action) -> Unit) {
+    val words = LocalWords.current
+    val palette = LocalPalette.current
+    DropdownMenu(expanded, onDismiss) {
+        if (item.body != FeedItem.Body.Locked) {
+            Row(Modifier.padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                for (key in quickReactions) {
+                    val mine = item.reactions.any { it.key == key && it.mine }
+                    Text(key, fontSize = 22.sp, modifier = Modifier.clip(CircleShape)
+                        .background(if (mine) palette.sky.copy(alpha = 0.18f) else Color.Transparent)
+                        .clickable { onAction(Action.React(key)) }.padding(6.dp))
+                }
+            }
+            HorizontalDivider(color = palette.plate)
+        }
+        DropdownMenuItem({ Text(words(P.reply)) }, { onAction(Action.Reply) })
+        if (item.body is FeedItem.Body.Text) DropdownMenuItem({ Text(words(P.copy)) }, { onAction(Action.Copy) })
+        if (item.canEdit) DropdownMenuItem({ Text(words(P.editAction)) }, { onAction(Action.Edit) })
+        if (item.canDelete) DropdownMenuItem({ Text(words(P.deleteAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Delete) })
+    }
+}
+
+/** Над полем ввода: на что отвечаем или что правим, с крестиком. */
+@Composable
+private fun ComposerBanner(title: String, text: String, onClose: () -> Unit) {
+    val palette = LocalPalette.current
+    Row(Modifier.fillMaxWidth().background(palette.card).padding(start = 16.dp, end = 4.dp, top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(Modifier.width(3.dp).heightIn(min = 34.dp).clip(RoundedCornerShape(2.dp)).background(palette.sky))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Text(text, color = palette.quiet, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text("✕", color = palette.quiet, fontSize = 16.sp, modifier = Modifier.clip(CircleShape).clickable(onClick = onClose).padding(12.dp))
+    }
+}
+
+/** Одна строка о реплике для плашки ответа и правки. */
+private fun summary(item: FeedItem, words: Words): String = when (val body = item.body) {
+    is FeedItem.Body.Text -> body.text.replace('\n', ' ')
+    is FeedItem.Body.Attachment -> kindLabel(body.kind, words)
+    FeedItem.Body.Locked -> words(P.waitingKey)
+    FeedItem.Body.Deleted -> words(P.deleted)
+    is FeedItem.Body.Notice -> ""
+}
+
+/** Цитата для своей реплики-ответа, пока она в очереди отправки. */
+private fun quoteOf(item: FeedItem, words: Words): Pair<String, String> = item.senderName to summary(item, words)
+
+private fun copyText(context: Context, text: String) {
+    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Нютаг", text))
 }

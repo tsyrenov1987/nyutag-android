@@ -40,6 +40,7 @@ import chat.nyutag.core.rooms.join
 import chat.nyutag.core.rooms.knock
 import chat.nyutag.core.rooms.leave
 import chat.nyutag.core.rooms.publicCommunities
+import chat.nyutag.core.rooms.redact
 import chat.nyutag.core.rooms.roomHierarchy
 import chat.nyutag.core.rooms.setRoomVisibility
 import chat.nyutag.core.rooms.setSpaceParent
@@ -388,9 +389,29 @@ class AppSession(context: Context, private val doors: DoorHub) {
         return runCatching { engine.backfill(roomID, 50) }.getOrNull()?.let { it.added > 0 || it.hasMore } ?: false
     }
 
-    /** Текст в чат; `null` — не ушло. */
-    suspend fun sendText(roomID: String, text: String, transactionID: String = TransactionID.make()): String? =
-        post(EventType.MESSAGE, JsonValue.of("msgtype" to "m.text", "body" to text), roomID, transactionID)
+    /** Текст в чат, `replyTo` — ответ на реплику; `null` — не ушло. Тот же `transactionID` при повторе сервер не дублирует. */
+    suspend fun sendText(roomID: String, text: String, transactionID: String = TransactionID.make(), replyTo: String? = null): String? {
+        val content = if (replyTo == null) JsonValue.of("msgtype" to "m.text", "body" to text)
+        else JsonValue.of("msgtype" to "m.text", "body" to text,
+                          "m.relates_to" to JsonValue.of("m.in_reply_to" to JsonValue.of("event_id" to replyTo)))
+        return post(EventType.MESSAGE, content, roomID, transactionID)
+    }
+
+    /** Новый текст своей реплики. */
+    suspend fun edit(roomID: String, eventID: String, text: String): Boolean =
+        post(EventType.MESSAGE, Relations.edit(eventID, text), roomID, TransactionID.make()) != null
+
+    /** Удалить реплику у всех. */
+    suspend fun delete(roomID: String, eventID: String): Boolean {
+        val account = account ?: return false
+        return runCatching { account.client.redact(roomID, eventID) }.onFailure { log("удаление не прошло: $it") }.isSuccess
+    }
+
+    /** Реакция: нашей с таким ключом ещё нет — ставим, есть — снимаем. */
+    suspend fun toggleReaction(roomID: String, item: FeedItem, key: String): Boolean {
+        item.reactions.firstOrNull { it.key == key }?.myEventID?.let { return delete(roomID, it) }
+        return post(EventType.REACTION, Relations.reaction(item.id, key), roomID, TransactionID.make()) != null
+    }
 
     /** Событие в комнату; в шифрованную — через машину. */
     private suspend fun post(type: String, content: JsonValue, roomID: String, transactionID: String): String? {

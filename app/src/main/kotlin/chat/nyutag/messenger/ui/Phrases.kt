@@ -357,6 +357,7 @@ object P {
     // Звонки
     val callAction = Phrase(bxr = "Залгаха", ru = "Позвонить", en = "Call")
     val callCalling = Phrase(bxr = "Залгажа байна…", ru = "Звоним…", en = "Calling…")
+    val callAlerting = Phrase(bxr = "Залгажа байна…", ru = "Идут гудки…", en = "Ringing…")
     val callIncoming = Phrase(bxr = "Танда залгажа байна", ru = "Входящий звонок", en = "Incoming call")
     val callConnecting = Phrase(bxr = "Холбожо байна…", ru = "Соединяем…", en = "Connecting…")
     val callEnded = Phrase(bxr = "Хөөрэлдөөн дууһаба", ru = "Звонок завершён", en = "Call ended")

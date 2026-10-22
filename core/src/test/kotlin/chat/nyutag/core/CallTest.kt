@@ -38,7 +38,7 @@ class CallTest {
         for (signal in listOf(
             CallSignal.Ring(id, false, 45_000), CallSignal.Offer(id, key, true), CallSignal.Answer(id, key, "DEV"),
             CallSignal.End(id, CallEndReason.DECLINED), CallSignal.Ring(id, false, 45_000, group = true),
-            CallSignal.Join(id, CallID.make(), key, 77, "DEV"), CallSignal.Leave(id, "DEV"),
+            CallSignal.Join(id, CallID.make(), key, 77, "DEV"), CallSignal.Leave(id, "DEV"), CallSignal.Ringing(id, "!room:nyutag.chat", "DEV"),
         )) {
             // Через текст: так событие и ходит по сети.
             val wire = JsonValue.parse(signal.content.compact())

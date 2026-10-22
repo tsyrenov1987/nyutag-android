@@ -124,7 +124,8 @@ fun CallScreen(desk: CallDesk) {
     val camera = rememberCameraAccess()
     var micDenied by remember(session) { mutableStateOf(false) }
     var cameraDenied by remember(session) { mutableStateOf(false) }
-    val talking = phase == CallPhase.Calling || phase == CallPhase.Connecting || phase is CallPhase.Live
+    val talking = phase == CallPhase.Calling || phase == CallPhase.Alerting || phase == CallPhase.Connecting ||
+        phase is CallPhase.Live
     val direct = session?.group == false
     val showRemote = direct && remoteVisible && talking
     // «Назад» сворачивает идущий звонок; входящий ждёт ответа.
@@ -279,6 +280,7 @@ private fun CallStatus(phase: CallPhase?, color: Color, size: Int) {
     val words = LocalWords.current
     val text = when (phase) {
         CallPhase.Calling -> words(P.callCalling)
+        CallPhase.Alerting -> words(P.callAlerting)
         CallPhase.Ringing -> words(P.callIncoming)
         CallPhase.Connecting -> words(P.callConnecting)
         is CallPhase.Live -> {

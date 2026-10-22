@@ -43,6 +43,41 @@ class CallFlowTest {
         const val CAROL = "@carol:nyutag.chat"
     }
 
+    @Test fun callerHearsRingbackOnceCalleeRings() = runBlocking {
+        val line = Line()
+        val alice = line.center(ALICE, "A1")
+        val bob = line.center(BOB, "B1")
+        val call = requireNotNull(alice.dial(ROOM, BOB))
+        val incoming = first(bob.incoming)
+        // У Боба звенит — у Алисы вместо «Звоним…» идут гудки, и ответ из этой фазы принимается.
+        until { call.phase == CallPhase.Alerting }
+        assertTrue(line.posted.any { it == CallSignal.Ringing(call.callID, ROOM, "B1") })
+        incoming.accept()
+        waitLive(call)
+        call.hangUp()
+    }
+
+    @Test fun callingWithoutRingingStaysCalling() = runBlocking {
+        val line = Line()
+        val alice = line.center(ALICE, "A1")
+        val call = requireNotNull(alice.dial(ROOM, BOB))
+        delay(300)
+        assertEquals(CallPhase.Calling, call.phase)
+        call.hangUp()
+    }
+
+    @Test fun ringWithSkewedClockStillRings() = runBlocking {
+        val bob = Line().center(BOB, "B1")
+        val id = CallID.make()
+        val now = System.currentTimeMillis()
+        // Будильник на 45 с, но по часам сервера ему уже 44 с: звенит всё равно не меньше 30 с.
+        bob.absorb(CallMessage(CallSignal.Ring(id, false, 45_000), ROOM, ALICE, "\$r", now - 44_000), now)
+        val incoming = first(bob.incoming)
+        delay(2_500)
+        assertEquals(CallPhase.Ringing, incoming.phase)
+        incoming.hangUp()
+    }
+
     @Test fun callIsAnsweredAndVoiceFlows() = runBlocking {
         val line = Line()
         val alice = line.center(ALICE, "A1")
@@ -300,6 +335,7 @@ class Line {
             makeVoice = { ToneVoice() },
             codecs = PcmCodecs,
             ringTimeout = ringTimeout, lossGrace = lossGrace, silenceLimit = silenceLimit, retryDelay = 50,
+            notify = { signal, _ -> if (signal is CallSignal.Ringing) deliver(signal, signal.roomID, user) },
         )
         val center = CallCenter(env)
         synchronized(this) { centers += center to rooms }

@@ -1,5 +1,6 @@
 // Нютаг. Стойка звонков для экрана: какой звонок идёт, его фаза, участники группового, микрофон, громкая связь и камера.
-// Входящий звенит мелодией телефона с вибрацией, исходящий — гудками. Идущий звонок держит службу переднего плана:
+// Входящий звенит мелодией телефона с вибрацией. Исходящий — длинными гудками, пока у собеседника звенит (или через 5 с
+// «Звоним…», если собеседник старой версии не сообщает, что у него звенит); оборвался не по нашей кнопке — короткими. Идущий звонок держит службу переднего плана:
 // без неё система глушит микрофон, когда экран гаснет или приложение уходит в фон.
 
 package chat.nyutag.messenger.calls
@@ -15,6 +16,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
 import chat.nyutag.core.calls.CallCenter
+import chat.nyutag.core.calls.CallEndReason
 import chat.nyutag.core.calls.CallMessage
 import chat.nyutag.core.calls.CallPhase
 import chat.nyutag.core.calls.CallSession
@@ -61,6 +63,8 @@ class CallDesk(private val context: Context) {
     val preview: StateFlow<CameraPreview?> get() = previewFlow
     /** Когда собеседник последний раз показал кадр (мс от загрузки); 0 — ещё не показывал. */
     @Volatile private var lastShown = 0L
+    // Звонок положили нашей кнопкой: коротких гудков в конце не нужно.
+    @Volatile private var hungUpHere = false
     private var videoWatch: Job? = null
 
     private var center: CallCenter? = null
@@ -138,6 +142,7 @@ class CallDesk(private val context: Context) {
     }
 
     suspend fun hangUp() {
+        hungUpHere = true
         currentFlow.value?.hangUp()
     }
 
@@ -168,7 +173,9 @@ class CallDesk(private val context: Context) {
     }
 
     fun setFolded(folded: Boolean) {
-        foldedFlow.value = folded && phaseFlow.value.let { it == CallPhase.Calling || it == CallPhase.Connecting || it is CallPhase.Live }
+        foldedFlow.value = folded && phaseFlow.value.let {
+            it == CallPhase.Calling || it == CallPhase.Alerting || it == CallPhase.Connecting || it is CallPhase.Live
+        }
     }
 
     private fun show(session: CallSession) {
@@ -182,6 +189,7 @@ class CallDesk(private val context: Context) {
         remoteVisibleFlow.value = false
         previewFlow.value = null
         voice = null
+        hungUpHere = false
         if (session.isCaller) CallService.start(context, peerNameFlow.value)
         memberWatch?.cancel()
         if (session.group) memberWatch = watchMembers(session)
@@ -190,9 +198,14 @@ class CallDesk(private val context: Context) {
         follower?.cancel()
         follower = scope.launch {
             var loud = false
+            var before: CallPhase? = null
             session.phases.takeWhile { phase ->
                 phaseFlow.value = phase
-                ringer.follow(phase)
+                // Конец звонка разбираем ниже, один раз, с последним живым этапом.
+                if (phase != before && !phase.isEnded) {
+                    ringer.follow(phase, before, session.group, hungUpHere)
+                    before = phase
+                }
                 notice.follow(phase, peerNameFlow.value, session.video)
                 // Видеозвонок держат перед собой, а не у уха: сразу громкая связь, как на iOS.
                 if (phase is CallPhase.Live && session.video && !loud) {
@@ -203,12 +216,12 @@ class CallDesk(private val context: Context) {
                 !phase.isEnded
             }.collect {}
             phaseFlow.value = session.phase
-            ringer.follow(session.phase)
+            val beeps = ringer.follow(session.phase, before, session.group, hungUpHere)
             notice.follow(session.phase, peerNameFlow.value, session.video)
             CallService.stop(context)
             session.stats?.let { log("звонок итог: ушло ${it.sent}, пришло ${it.received}, сыграно ${it.played}, потеряно ${it.lost}") }
-            // Итог висит на экране недолго, потом экран уходит.
-            delay(1_500)
+            // Итог висит на экране недолго (пока звучат короткие гудки), потом экран уходит.
+            delay(if (beeps) 2_500 else 1_500)
             if (currentFlow.value !== session) return@launch
             currentFlow.value = null
             phaseFlow.value = null
@@ -271,7 +284,7 @@ class CallDesk(private val context: Context) {
     }
 
     fun close() {
-        ringer.follow(null)
+        ringer.quiet()
         scope.cancel()
     }
 
@@ -285,13 +298,29 @@ class CallDesk(private val context: Context) {
         private var tones: ToneGenerator? = null
         private var vibrating = false
         private val vibrator = context.getSystemService(Vibrator::class.java)
+        private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        private val lateRingback = Runnable { ringback() }
 
-        fun follow(phase: CallPhase?) {
-            when (phase) {
-                CallPhase.Ringing -> ring()
-                CallPhase.Calling -> ringback()
+        /** `true` — звучат короткие гудки: звонок оборвался не по нашей кнопке. */
+        fun follow(phase: CallPhase?, before: CallPhase?, group: Boolean, hungUpHere: Boolean): Boolean {
+            when {
+                phase == CallPhase.Ringing -> ring()
+                group -> quiet()
+                // Собеседник старой версии не сообщает, что у него звенит: гудки через 5 с.
+                phase == CallPhase.Calling -> { quiet(); handler.postDelayed(lateRingback, 5_000) }
+                phase == CallPhase.Alerting -> ringback()
+                phase is CallPhase.Ended -> {
+                    quiet()
+                    val talked = before == CallPhase.Calling || before == CallPhase.Alerting ||
+                        before == CallPhase.Connecting || before is CallPhase.Live
+                    if (talked && !hungUpHere && phase.reason != CallEndReason.ELSEWHERE) {
+                        busy()
+                        return true
+                    }
+                }
                 else -> quiet()
             }
+            return false
         }
 
         private fun ring() {
@@ -315,9 +344,19 @@ class CallDesk(private val context: Context) {
             tones = runCatching { ToneGenerator(AudioManager.STREAM_VOICE_CALL, 70) }.getOrNull()?.apply {
                 startTone(ToneGenerator.TONE_SUP_RINGTONE)
             }
+            if (BuildConfig.DEBUG) Log.d("ui-check", "гудки: длинные")
         }
 
-        private fun quiet() {
+        /** Три коротких гудка (по 0,5 с, 425 Гц), генератор гаснет сам. */
+        private fun busy() {
+            val generator = runCatching { ToneGenerator(AudioManager.STREAM_VOICE_CALL, 70) }.getOrNull() ?: return
+            generator.startTone(ToneGenerator.TONE_SUP_BUSY, 2_500)
+            if (BuildConfig.DEBUG) Log.d("ui-check", "гудки: короткие")
+            handler.postDelayed({ generator.release() }, 2_700)
+        }
+
+        fun quiet() {
+            handler.removeCallbacks(lateRingback)
             ringtone?.stop()
             ringtone = null
             tones?.let { it.stopTone(); it.release() }

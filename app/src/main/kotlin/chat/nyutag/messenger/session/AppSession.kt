@@ -21,6 +21,7 @@ import chat.nyutag.core.crypto.CryptoMachine
 import chat.nyutag.core.crypto.E2EEException
 import chat.nyutag.core.crypto.PasswordUnlockOutcome
 import chat.nyutag.core.crypto.sendEncrypted
+import chat.nyutag.core.crypto.sendToDevice
 import chat.nyutag.core.crypto.importCrossSigning
 import chat.nyutag.core.crypto.relockWithPassword
 import chat.nyutag.core.crypto.unlockWithPassword
@@ -713,6 +714,13 @@ class AppSession(context: Context, private val doors: DoorHub) {
             codecs = OpusCodecs,
             videoCodecs = H264Codecs,
             makeCamera = { calls.makeCamera() },
+            // «У меня звонит» — открытым сообщением всем устройствам звонящего: в ленту и пуши оно не попадает.
+            notify = { signal, user ->
+                val sent = runCatching {
+                    client.sendToDevice(signal.eventType, mapOf(user to mapOf("*" to signal.content)))
+                }.isSuccess
+                log("сигнал ${signal.eventType} ${if (sent) "ушёл" else "не ушёл"}")
+            },
         )
         calls.name = { roomID, peer -> title(roomID).ifEmpty { ChatDigest.localpart(peer) } }
         calls.memberName = { roomID, user -> displayName(roomID, user) }
@@ -739,6 +747,11 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val waiting = lockedSignals.filter { (it.first.originServerTS ?: 0) > fresh }
         val locked = ArrayList<Pair<Event, String>>()
         val arrived = ArrayList(waiting)
+        for (event in response.toDevice) {
+            val message = CallMessage.ofToDevice(event) ?: continue
+            log("пришёл сигнал ${event.type} с устройства")
+            calls.absorb(message)
+        }
         for ((roomID, room) in response.joined) {
             for (event in room.timeline.events) if ((event.originServerTS ?: 0) > fresh) arrived += event to roomID
         }

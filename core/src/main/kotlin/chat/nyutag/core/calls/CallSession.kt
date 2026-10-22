@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicReference
 sealed class CallPhase {
     /** Мы звоним, собеседник ещё не ответил. */
     object Calling : CallPhase() { override fun toString() = "Calling" }
+    /** Мы звоним, у собеседника звенит (пришло его «у меня звонит»): идут гудки. */
+    object Alerting : CallPhase() { override fun toString() = "Alerting" }
     /** Звонят нам. */
     object Ringing : CallPhase() { override fun toString() = "Ringing" }
     /** Ответ есть, сводим связь через релей. */
@@ -58,6 +60,8 @@ class CallEnvironment(
      *  собеседника): переподключаемся и ждём lossGrace. Собеседник шлёт кадры всегда, и с выключенным микрофоном. */
     val silenceLimit: Long = 5_000,
     val retryDelay: Long = 1_000,
+    /** Сообщение устройствам человека (to-device): «у меня звонит». Второй аргумент — кому. */
+    val notify: suspend (CallSignal, String) -> Unit = { _, _ -> },
 )
 
 /** Участник группового звонка. */
@@ -138,9 +142,13 @@ class CallSession internal constructor(
 
     // MARK: Нам звонят
 
-    /** Будильник звенит до `untilMillis`; не ответили — пропущенный, без сигнала в комнату. */
+    /** Будильник звенит до `untilMillis`; не ответили — пропущенный, без сигнала в комнату.
+     *  Звонящему сразу уходит «у меня звонит»: у него вместо «Звоним…» пойдут гудки. */
     internal suspend fun ring(untilMillis: Long) = confined {
         arm(maxOf(untilMillis - System.currentTimeMillis(), 1_000), CallEndReason.NO_ANSWER, notify = false)
+        if (group) return@confined
+        val signal = CallSignal.Ringing(callID, roomID, env.deviceID)
+        scope.launch { runCatching { env.notify(signal, peer) } }
     }
 
     suspend fun accept() = confined {
@@ -195,6 +203,9 @@ class CallSession internal constructor(
         val mine = message.sender == env.me
         if (group) return@confined handleGroup(message, mine)
         when (val signal = message.signal) {
+            is CallSignal.Ringing -> {
+                if (isCaller && phase == CallPhase.Calling && message.sender == peer) set(CallPhase.Alerting)
+            }
             is CallSignal.Offer -> {
                 if (isCaller || mine || message.sender != peer || theirKey != null) return@confined
                 theirKey = signal.key
@@ -208,7 +219,7 @@ class CallSession internal constructor(
                     }
                     return@confined
                 }
-                if (!isCaller || phase != CallPhase.Calling || message.sender != peer) return@confined
+                if (!isCaller || (phase != CallPhase.Calling && phase != CallPhase.Alerting) || message.sender != peer) return@confined
                 val secret = runCatching { keys.secret(signal.key, callID, isCaller = true) }.getOrNull() ?: return@confined
                 set(CallPhase.Connecting)
                 arm(env.connectTimeout, CallEndReason.LOST, notify = true)
@@ -250,7 +261,7 @@ class CallSession internal constructor(
                 if (mine || message.sender != peer || phase.isLive) return
                 finish(signal.reason, notify = false)
             }
-            is CallSignal.Ring, is CallSignal.Offer, is CallSignal.Answer -> {}
+            is CallSignal.Ring, is CallSignal.Offer, is CallSignal.Answer, is CallSignal.Ringing -> {}
         }
     }
 

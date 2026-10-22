@@ -66,7 +66,11 @@ class CallCenter(private val env: CallEnvironment) {
                 val session = CallSession(id, message.roomID, message.sender, isCaller = false, video = signal.video,
                                           group = signal.group, env = env)
                 sessions[id] = session
-                session.ring((message.timestamp ?: 0) + signal.lifetimeMillis)
+                // Время будильника — по часам сервера. Часы телефона могут расходиться на десятки секунд, поэтому
+                // звеним не меньше MINIMUM_RING: раньше звонок гасит отбой звонящего.
+                val until = maxOf((message.timestamp ?: 0) + signal.lifetimeMillis,
+                                  now + minOf(MINIMUM_RING, signal.lifetimeMillis))
+                session.ring(until)
                 earlyOffers.remove(id)?.let { session.handle(it) }
                 earlyJoins.remove(id)?.forEach { session.handle(it) }
                 incomingChannel.trySend(session)
@@ -81,7 +85,12 @@ class CallCenter(private val env: CallEnvironment) {
                 val list = earlyJoins.getOrPut(id) { ArrayList() }
                 if (list.size < 32) list += message
             }
-            is CallSignal.Answer, is CallSignal.End, is CallSignal.Leave -> {}
+            is CallSignal.Answer, is CallSignal.End, is CallSignal.Leave, is CallSignal.Ringing -> {}
         }
+    }
+
+    companion object {
+        /** Сколько звенеть входящему как минимум, мс, сколько бы будильник ни шёл по чужим часам. */
+        const val MINIMUM_RING = 30_000L
     }
 }

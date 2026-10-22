@@ -4,6 +4,8 @@
 // в offer и answer лежат открытые ключи X25519, из которых стороны выводят ключ кадров.
 // Групповой звонок (только в шифрованной комнате): будильник с `group`, дальше каждый вошедший шлёт
 // `chat.nyutag.call.join` со слотом релея, своим ключом кадров и меткой, ушедший — `chat.nyutag.call.leave`.
+// `chat.nyutag.call.ringing` — не событие комнаты, а сообщение устройству (to-device): «у меня звонит». Звонящий по нему
+// переходит от «Звоним…» к гудкам. В ленту и пуши оно не попадает, старые версии его просто не знают.
 
 package chat.nyutag.core.calls
 
@@ -53,6 +55,9 @@ sealed class CallSignal {
 
     data class Leave(override val callID: String, val deviceID: String) : CallSignal()
 
+    /** Будильник звенит на устройстве `deviceID` того, кому звонят. Идёт сообщением устройству, комнату несёт в себе. */
+    data class Ringing(override val callID: String, val roomID: String, val deviceID: String) : CallSignal()
+
     val eventType: String get() = when (this) {
         is Ring -> CallEventType.RING
         is Offer -> CallEventType.OFFER
@@ -60,6 +65,7 @@ sealed class CallSignal {
         is End -> CallEventType.END
         is Join -> CallEventType.JOIN
         is Leave -> CallEventType.LEAVE
+        is Ringing -> CallEventType.RINGING
     }
 
     /** Нужен ли шифр комнаты. Будильник открыт всегда: иначе сервер не узнает, что это звонок. */
@@ -77,6 +83,7 @@ sealed class CallSignal {
         is Join -> JsonValue.of("call_id" to callID, "slot" to slot, "key" to Base64.encodePadded(key), "tag" to tag,
                                 "device_id" to deviceID, "version" to VERSION)
         is Leave -> JsonValue.of("call_id" to callID, "device_id" to deviceID, "version" to VERSION)
+        is Ringing -> JsonValue.of("call_id" to callID, "room_id" to roomID, "device_id" to deviceID, "version" to VERSION)
     }
 
     companion object {
@@ -108,6 +115,11 @@ sealed class CallSignal {
                     Join(id, slot, key, tag, content["device_id"]?.string ?: return null)
                 }
                 CallEventType.LEAVE -> Leave(id, content["device_id"]?.string ?: return null)
+                CallEventType.RINGING -> {
+                    val room = content["room_id"]?.string ?: return null
+                    if (!room.startsWith("!")) return null
+                    Ringing(id, room, content["device_id"]?.string ?: return null)
+                }
                 else -> null
             }
         }
@@ -137,6 +149,14 @@ data class CallMessage(
             val sender = event.sender ?: return null
             val signal = CallSignal.parse(event.type, event.content) ?: return null
             return CallMessage(signal, roomID, sender, event.eventID, event.originServerTS)
+        }
+
+        /** Из сообщения устройству: только «у меня звонит», комната — из содержимого. */
+        fun ofToDevice(event: Event): CallMessage? {
+            if (event.type != CallEventType.RINGING) return null
+            val sender = event.sender ?: return null
+            val signal = CallSignal.parse(event.type, event.content) as? CallSignal.Ringing ?: return null
+            return CallMessage(signal, signal.roomID, sender)
         }
     }
 }

@@ -29,6 +29,7 @@ import chat.nyutag.core.calls.VoicePipe
 import chat.nyutag.core.calls.RelayLink
 import chat.nyutag.core.crypto.CryptoMachine
 import chat.nyutag.core.crypto.sendEncrypted
+import chat.nyutag.core.crypto.sendToDevice
 import chat.nyutag.core.net.Door
 import chat.nyutag.core.net.MatrixClient
 import chat.nyutag.core.rooms.send
@@ -108,6 +109,10 @@ class LiveCallPeerTest {
                     println("peer: ушёл ${signal.eventType}")
                 },
                 openTransport = { slot -> RelayLink.open(client, slot) },
+                notify = { signal, user ->
+                    client.sendToDevice(signal.eventType, mapOf(user to mapOf("*" to signal.content)))
+                    println("peer: ушёл ${signal.eventType} устройствам")
+                },
                 makeVoice = { EchoVoice() },
                 codecs = PassCodecs,
                 videoCodecs = video,
@@ -117,6 +122,11 @@ class LiveCallPeerTest {
             val fresh = { System.currentTimeMillis() - 120_000 }
             scope.launch {
                 engine.updates.collect { update ->
+                    for (event in update.response.toDevice) {
+                        val message = CallMessage.ofToDevice(event) ?: continue
+                        println("peer: пришёл ${event.type} с устройства")
+                        center.absorb(message)
+                    }
                     for ((roomID, joined) in update.response.joined) {
                         for (event in joined.timeline.events) {
                             if ((event.originServerTS ?: 0) < fresh()) continue
@@ -137,7 +147,8 @@ class LiveCallPeerTest {
             } else {
                 println("peer: жду звонка ${seconds} с")
                 withTimeoutOrNull(seconds * 1_000) { center.incoming.receive() }?.also {
-                    delay(2_000)
+                    // NYUTAG_PEER_ANSWER_AFTER — сколько секунд звенеть до ответа (у звонящего идут гудки).
+                    delay((env["NYUTAG_PEER_ANSWER_AFTER"]?.toLongOrNull() ?: 2) * 1_000)
                     it.accept()
                 } ?: return@runBlocking println("peer: звонка не было")
             }

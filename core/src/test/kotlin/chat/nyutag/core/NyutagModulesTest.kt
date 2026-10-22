@@ -9,6 +9,7 @@ import chat.nyutag.core.nyutag.BuryatLetters
 import chat.nyutag.core.nyutag.ContactMedium
 import chat.nyutag.core.nyutag.InviteCode
 import chat.nyutag.core.nyutag.NyutagService
+import chat.nyutag.core.nyutag.QrCode
 import chat.nyutag.core.nyutag.Sagaalgan
 import chat.nyutag.core.nyutag.ZurkhaiDay
 import chat.nyutag.core.nyutag.ZurkhaiDays
@@ -183,5 +184,36 @@ class NyutagModulesTest {
         // Без нужного поля — ошибка разбора, а не пустая строка.
         stub.response = JsonValue.of()
         assertTrue((runCatching { service.register("C", "u", "p") }.exceptionOrNull() as? MatrixError)?.kind is MatrixError.Kind.Decoding)
+    }
+
+    // MARK: QR приглашения
+
+    @Test fun qrCapacityAndPatterns() {
+        assertEquals(9, QrCode.dataCodewords(1))
+        assertEquals(36, QrCode.dataCodewords(4))
+        assertEquals(122, QrCode.dataCodewords(10))
+        val qr = requireNotNull(QrCode.encode("https://nyutag.chat/i/#ABCD-1234"))
+        assertEquals(4, qr.version)
+        assertEquals(33, qr.size)
+        // Искатели в трёх углах: тёмная рамка 7×7, светлое кольцо, тёмная середина 3×3.
+        for ((cx, cy) in listOf(3 to 3, qr.size - 4 to 3, 3 to qr.size - 4)) {
+            assertTrue(qr[cx - 3, cy - 3] && qr[cx + 3, cy + 3] && qr[cx, cy])
+            assertFalse(qr[cx - 2, cy - 2] || qr[cx + 2, cy])
+        }
+        assertTrue(qr[8, qr.size - 8])
+        assertNull(QrCode.encode("x".repeat(120)))
+        assertEquals(10, QrCode.encode("x".repeat(119))?.version)
+        // Картинка для сверки системным распознавателем на Маке (tools/qr-check.swift).
+        System.getenv("NYUTAG_QR_PNG")?.let { path ->
+            val scale = 10
+            val image = java.awt.image.BufferedImage((qr.size + 8) * scale, (qr.size + 8) * scale, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            for (y in 0 until image.height) for (x in 0 until image.width) {
+                val mx = x / scale - 4
+                val my = y / scale - 4
+                val dark = mx in 0 until qr.size && my in 0 until qr.size && qr[mx, my]
+                image.setRGB(x, y, if (dark) 0 else 0xFFFFFF)
+            }
+            javax.imageio.ImageIO.write(image, "png", java.io.File(path))
+        }
     }
 }

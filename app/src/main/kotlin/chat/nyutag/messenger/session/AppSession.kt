@@ -14,6 +14,8 @@ import chat.nyutag.core.crypto.PasswordUnlockOutcome
 import chat.nyutag.core.crypto.sendEncrypted
 import chat.nyutag.core.crypto.unlockWithPassword
 import chat.nyutag.core.net.MatrixError
+import chat.nyutag.core.nyutag.IssuedInvite
+import chat.nyutag.core.nyutag.InviteCode
 import chat.nyutag.core.nyutag.NyutagService
 import chat.nyutag.core.rooms.ChatDigest
 import chat.nyutag.core.rooms.ChatFeed
@@ -21,10 +23,16 @@ import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
 import chat.nyutag.core.rooms.IgnoredUsers
 import chat.nyutag.core.rooms.MutedRooms
+import chat.nyutag.core.rooms.People
+import chat.nyutag.core.rooms.Person
 import chat.nyutag.core.rooms.Relations
 import chat.nyutag.core.rooms.TransactionID
 import chat.nyutag.core.rooms.backfill
+import chat.nyutag.core.rooms.createDirectRoom
 import chat.nyutag.core.rooms.join
+import chat.nyutag.core.rooms.person
+import chat.nyutag.core.rooms.profile
+import chat.nyutag.core.rooms.searchUsers
 import chat.nyutag.core.rooms.send
 import chat.nyutag.core.rooms.setDisplayName
 import chat.nyutag.core.rooms.setReadMarkers
@@ -56,6 +64,10 @@ class AppSession(context: Context, private val doors: DoorHub) {
     enum class Phase { LAUNCHING, SIGNED_OUT, SIGNED_IN }
 
     enum class SignInFailure { WRONG_PASSWORD, TOO_OFTEN, NO_NETWORK, BROKEN }
+
+    enum class InviteFailure { LIMIT, NO_NETWORK, BROKEN }
+
+    class InviteException(val failure: InviteFailure) : Exception(failure.name)
 
     class SignInException(val failure: SignInFailure) : Exception(failure.name)
 
@@ -90,6 +102,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private val opened = ConcurrentHashMap<String, Event>()
     private val autoJoined = HashSet<String>()
     private val refreshing = Mutex()
+    /** Сверка книжки с сервером не чаще раза в десять минут: у сервера суточный предел. */
+    private var matchedAt = 0L
+    private var matches: Map<String, String> = emptyMap()
 
     // MARK: Вход
 
@@ -134,6 +149,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
         linesFlow.value = emptyList()
         typingFlow.value = emptyMap()
         historyFlow.value = null
+        matchedAt = 0L
+        matches = emptyMap()
         phaseFlow.value = Phase.SIGNED_OUT
     }
 
@@ -287,6 +304,89 @@ class AppSession(context: Context, private val doors: DoorHub) {
         } ?: ChatDigest.localpart(userID)
     }
 
+    // MARK: Контакты
+
+    /** С кем уже есть личный чат. */
+    suspend fun knownPeople(): List<Person> {
+        val account = account ?: return emptyList()
+        val me = me ?: return emptyList()
+        return withContext(Dispatchers.IO) { runCatching { People.known(account.store, me) }.getOrDefault(emptyList()) }
+    }
+
+    /** Номера из книжки → кто из них в Нютаге. Сервер берёт до 500 номеров за раз; ответ помним десять минут. */
+    suspend fun lookup(phones: List<String>, fresh: Boolean = false): Map<String, String> {
+        val account = account ?: return emptyMap()
+        val now = System.currentTimeMillis()
+        if (!fresh && now - matchedAt < 600_000) return matches
+        val service = NyutagService(account.client)
+        val found = LinkedHashMap<String, String>()
+        for (part in phones.chunked(500)) {
+            val got = runCatching { service.lookup(part) }.getOrNull() ?: break
+            for ((phone, user) in got) found.putIfAbsent(phone, user)
+        }
+        matchedAt = now
+        matches = found
+        log("сверка книжки: номеров ${phones.size}, в Нютаге ${found.size}")
+        return found
+    }
+
+    suspend fun searchPeople(term: String): List<Person> {
+        val account = account ?: return emptyList()
+        val me = me ?: return emptyList()
+        val found = runCatching { account.client.searchUsers(term) }.getOrDefault(emptyList()).toMutableList()
+        // Набран номер: сервер скажет, чей он. Номер виден только тому, кто его уже знает.
+        if (term.count(Char::isDigit) >= 10 && People.phoneKey(term) != null) {
+            val userID = runCatching { NyutagService(account.client).lookup(listOf(term)).values.firstOrNull() }.getOrNull()
+            if (userID != null && userID != me) {
+                val name = runCatching { account.client.profile(userID).displayName }.getOrNull()?.takeIf { it.isNotEmpty() }
+                    ?: ChatDigest.localpart(userID)
+                found.removeAll { it.userID == userID }
+                found.add(0, Person(userID, name, phone = term))
+            }
+        }
+        val exact = runCatching { account.client.person(term, me.substringAfter(':')) }.getOrNull()
+        if (exact != null && found.none { it.userID == exact.userID }) found.add(0, exact)
+        return found.filter { it.userID != me }
+    }
+
+    /** Личный чат с человеком: свой, если уже есть (приглашение принимаем), иначе новый шифрованный. */
+    suspend fun openDirect(userID: String): String? {
+        val account = account ?: return null
+        val me = me ?: return null
+        knownPeople().firstOrNull { it.userID == userID }?.directRoom?.let { roomID ->
+            val membership = withContext(Dispatchers.IO) { runCatching { account.store.room(roomID)?.membership }.getOrNull() }
+            if (membership == RoomRecord.Membership.INVITE && runCatching { account.client.join(roomID) }.isFailure) return null
+            return roomID
+        }
+        val roomID = runCatching { account.client.createDirectRoom(me, userID) }.getOrNull()
+        log("личный чат ${if (roomID == null) "не создан" else "создан"}")
+        return roomID
+    }
+
+    // MARK: Приглашения
+
+    suspend fun createInvite(): InviteCode {
+        val account = account ?: throw InviteException(InviteFailure.BROKEN)
+        return try {
+            NyutagService(account.client).createInvite()
+        } catch (e: MatrixError) {
+            throw InviteException(inviteFailure(e))
+        } catch (e: Exception) {
+            throw InviteException(InviteFailure.BROKEN)
+        }
+    }
+
+    /** Свои коды; `null` — не удалось узнать. */
+    suspend fun myInvites(): List<IssuedInvite>? {
+        val account = account ?: return null
+        return runCatching { NyutagService(account.client).invites() }.getOrNull()
+    }
+
+    suspend fun revokeInvite(code: String): Boolean {
+        val account = account ?: return false
+        return runCatching { NyutagService(account.client).revokeInvite(code) }.isSuccess
+    }
+
     private fun log(line: String) {
         if (BuildConfig.DEBUG) Log.d("ui-check", line)
     }
@@ -299,6 +399,12 @@ class AppSession(context: Context, private val doors: DoorHub) {
             if ('@' in identifier) return true
             val digits = identifier.count(Char::isDigit)
             return digits >= 7 && identifier.all { it.isDigit() || it in "+-() " }
+        }
+
+        fun inviteFailure(error: MatrixError): InviteFailure = when {
+            error.errcode == "NYUTAG_INVITE_LIMIT" || error.errcode == "M_LIMIT_EXCEEDED" -> InviteFailure.LIMIT
+            error.kind is MatrixError.Kind.Network -> InviteFailure.NO_NETWORK
+            else -> InviteFailure.BROKEN
         }
 
         fun failure(error: MatrixError): SignInFailure = when {

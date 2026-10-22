@@ -1,4 +1,4 @@
-// Нютаг. Единственное окно: язык → вход (или регистрация, сброс пароля) → чаты → переписка. Навигация — простое состояние и «назад».
+// Нютаг. Единственное окно: язык → вход (или регистрация, сброс пароля) → вкладки (чаты, контакты) → переписка. Навигация — простое состояние и «назад».
 
 package chat.nyutag.messenger
 
@@ -14,14 +14,15 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import chat.nyutag.messenger.session.AppSession
-import chat.nyutag.messenger.ui.ChatListScreen
 import chat.nyutag.messenger.ui.ChatScreen
+import chat.nyutag.messenger.ui.HomeScreen
 import chat.nyutag.messenger.ui.LanguageScreen
 import chat.nyutag.messenger.ui.LocalPalette
 import chat.nyutag.messenger.ui.LocalWords
@@ -45,9 +46,13 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(LocalWords provides words) {
                     val phase by session.phase.collectAsState()
                     var openRoom by rememberSaveable { mutableStateOf<String?>(null) }
+                    var tab by rememberSaveable { mutableIntStateOf(0) }
                     // Без входа: форма входа, регистрация или сброс пароля.
                     var entry by rememberSaveable { mutableStateOf(Entry.SIGN_IN) }
-                    LaunchedEffect(phase) { if (phase == AppSession.Phase.SIGNED_IN) entry = Entry.SIGN_IN }
+                    LaunchedEffect(phase) {
+                        if (phase == AppSession.Phase.SIGNED_IN) entry = Entry.SIGN_IN
+                        if (phase == AppSession.Phase.SIGNED_OUT) tab = 0
+                    }
                     when {
                         words.lang == null -> LanguageScreen(words)
                         phase == AppSession.Phase.LAUNCHING ->
@@ -60,7 +65,7 @@ class MainActivity : ComponentActivity() {
                             Entry.RESET -> PasswordResetScreen(session, app.doors) { entry = Entry.SIGN_IN }
                         }
                         openRoom != null -> ChatScreen(session, openRoom!!) { openRoom = null }
-                        else -> ChatListScreen(session) { openRoom = it }
+                        else -> HomeScreen(session, tab, { tab = it }) { openRoom = it }
                     }
                 }
             }

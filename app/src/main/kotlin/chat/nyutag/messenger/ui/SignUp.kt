@@ -526,7 +526,7 @@ fun PasswordResetScreen(session: AppSession, doors: DoorHub, onClose: () -> Unit
 
 /** Страница формы: полоса с «Отмена» и заголовком, ниже прокручиваемое содержимое. */
 @Composable
-private fun FormPage(title: String, onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+internal fun FormPage(title: String, onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding().imePadding()) {
@@ -542,15 +542,15 @@ private fun FormPage(title: String, onClose: () -> Unit, content: @Composable Co
 }
 
 @Composable
-private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
+internal fun FormCard(content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(LocalPalette.current.card), content = content)
 }
 
 @Composable
-private fun FormDivider() = HorizontalDivider(Modifier.padding(start = 16.dp), color = LocalPalette.current.plate)
+internal fun FormDivider() = HorizontalDivider(Modifier.padding(start = 16.dp), color = LocalPalette.current.plate)
 
 @Composable
-private fun fieldColors(): TextFieldColors {
+internal fun fieldColors(): TextFieldColors {
     val palette = LocalPalette.current
     return TextFieldDefaults.colors(
         focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,

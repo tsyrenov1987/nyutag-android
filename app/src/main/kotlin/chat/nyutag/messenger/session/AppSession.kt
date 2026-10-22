@@ -10,8 +10,11 @@ import chat.nyutag.core.auth.AccountKeeper
 import chat.nyutag.core.auth.Shelf
 import chat.nyutag.core.auth.SignedInAccount
 import chat.nyutag.core.crypto.CryptoMachine
+import chat.nyutag.core.crypto.E2EEException
 import chat.nyutag.core.crypto.PasswordUnlockOutcome
 import chat.nyutag.core.crypto.sendEncrypted
+import chat.nyutag.core.crypto.importCrossSigning
+import chat.nyutag.core.crypto.relockWithPassword
 import chat.nyutag.core.crypto.unlockWithPassword
 import chat.nyutag.core.net.MatrixError
 import chat.nyutag.core.nyutag.IssuedInvite
@@ -92,6 +95,10 @@ class AppSession(context: Context, private val doors: DoorHub) {
 
     class SignInException(val failure: SignInFailure) : Exception(failure.name)
 
+    enum class KeyFailure { WRONG_KEY, NO_NETWORK, BROKEN }
+
+    class KeyException(val failure: KeyFailure) : Exception(failure.name)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val keeper = AccountKeeper(KeystoreVault(context), Shelf(context.filesDir, AndroidSql::open)) { homeserver, token ->
         doors.makeClient(homeserver, token)
@@ -121,6 +128,11 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private var ignored: Set<String> = emptySet()
     var muted: Set<String> = emptySet()
         private set
+
+    /** Флаги без секретов: карточка «старые сообщения закрыты» должна пережить перезапуск. */
+    private val flags = context.getSharedPreferences("nyutag.history", Context.MODE_PRIVATE)
+    /** Пароль этого входа, пока история под старым ключом: ключ сразу перезапрёт хранилище паролем. */
+    @Volatile private var heldPassword: String? = null
 
     private var account: SignedInAccount? = null
     private var engine: SyncEngine? = null
@@ -204,6 +216,7 @@ class AppSession(context: Context, private val doors: DoorHub) {
         catalog = emptyList()
         typingFlow.value = emptyMap()
         historyFlow.value = null
+        heldPassword = null
         matchedAt = 0L
         matches = emptyMap()
         phaseFlow.value = Phase.SIGNED_OUT
@@ -223,8 +236,13 @@ class AppSession(context: Context, private val doors: DoorHub) {
             runCatching { machine.publishKeys(null) }
             if (password != null) {
                 // Пароль уже проверен сервером: им же запираем или открываем хранилище ключей.
-                historyFlow.value = runCatching { machine.unlockWithPassword(password) }.getOrNull()
-                log("история по паролю: ${historyFlow.value ?: "ошибка"}")
+                val outcome = runCatching { machine.unlockWithPassword(password) }.getOrNull()
+                historyFlow.value = outcome
+                if (outcome == PasswordUnlockOutcome.NeedsRecoveryKey || outcome == PasswordUnlockOutcome.NeedsOtherDevice) heldPassword = password
+                rememberHistory(outcome, account.session.userID)
+                log("история по паролю: ${outcome ?: "ошибка"}")
+            } else {
+                rememberedHistory(account.session.userID)?.let { historyFlow.value = it }
             }
         } catch (e: Exception) {
             // Без машины переписка в шифрованных чатах остаётся под замком, остальное работает.
@@ -248,6 +266,57 @@ class AppSession(context: Context, private val doors: DoorHub) {
         engine?.stop()
         engine = null
         machine = null
+    }
+
+    // MARK: Старая история
+
+    /** Пароль этого входа ещё в памяти: ключ сразу перезапрёт хранилище, и на следующих устройствах хватит пароля. */
+    val canRelockHistory: Boolean get() = heldPassword != null
+
+    /** Открыть старую историю ключом восстановления. С паролем в памяти хранилище сразу перезапирается им,
+     *  без пароля (после перезапуска) только открываем. */
+    suspend fun openHistory(recoveryKey: String) {
+        val machine = machine ?: throw KeyException(KeyFailure.BROKEN)
+        val me = me ?: throw KeyException(KeyFailure.BROKEN)
+        val key = recoveryKey.trim()
+        val imported = try {
+            val password = heldPassword
+            if (password != null) {
+                machine.relockWithPassword(key, password)
+            } else {
+                machine.importCrossSigning(key)
+                try { machine.restoreBackup(key).imported } catch (e: E2EEException) { 0 }
+            }
+        } catch (e: E2EEException.WrongRecoveryKey) {
+            throw KeyException(KeyFailure.WRONG_KEY)
+        } catch (e: E2EEException.Server) {
+            log("ключ не открыл историю: $e")
+            throw KeyException(if (e.error.kind is MatrixError.Kind.Network) KeyFailure.NO_NETWORK else KeyFailure.BROKEN)
+        } catch (e: Exception) {
+            log("ключ не открыл историю: $e")
+            throw KeyException(KeyFailure.BROKEN)
+        }
+        heldPassword = null
+        historyFlow.value = PasswordUnlockOutcome.Opened(imported)
+        rememberHistory(null, me)
+        log("история открыта ключом, ключей из бэкапа $imported")
+        refresh()
+        revisionFlow.value += 1
+    }
+
+    private fun rememberHistory(outcome: PasswordUnlockOutcome?, userID: String) {
+        val key = "locked.$userID"
+        when (outcome) {
+            PasswordUnlockOutcome.NeedsRecoveryKey -> flags.edit().putString(key, "key").apply()
+            PasswordUnlockOutcome.NeedsOtherDevice -> flags.edit().putString(key, "device").apply()
+            else -> flags.edit().remove(key).apply()
+        }
+    }
+
+    private fun rememberedHistory(userID: String): PasswordUnlockOutcome? = when (flags.getString("locked.$userID", null)) {
+        "key" -> PasswordUnlockOutcome.NeedsRecoveryKey
+        "device" -> PasswordUnlockOutcome.NeedsOtherDevice
+        else -> null
     }
 
     // MARK: Список

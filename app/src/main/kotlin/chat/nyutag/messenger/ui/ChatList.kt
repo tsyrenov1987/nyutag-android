@@ -32,6 +32,7 @@ import chat.nyutag.core.push.PushPreview
 import chat.nyutag.core.rooms.ChatDigest
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.store.RoomRecord
+import chat.nyutag.core.crypto.PasswordUnlockOutcome
 import chat.nyutag.messenger.session.AppSession
 import java.time.Instant
 import java.time.LocalDate
@@ -41,11 +42,13 @@ import java.time.format.TextStyle
 import java.time.temporal.ChronoUnit
 
 @Composable
-fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Unit) {
+fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Unit, onHistoryKey: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     val lines by session.lines.collectAsState()
     val typing by session.typing.collectAsState()
+    val history by session.history.collectAsState()
+    val locked = history == PasswordUnlockOutcome.NeedsRecoveryKey
     Column(Modifier.fillMaxSize().background(palette.milk)) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -54,6 +57,7 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
                 Pillow(session.me.orEmpty(), ChatDigest.localpart(session.me.orEmpty()), 36.dp)
             }
         }
+        if (locked) Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { LockedHistoryCard(onHistoryKey) }
         if (lines.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(words(P.chatsEmpty), color = palette.quiet, fontSize = 15.sp, modifier = Modifier.padding(32.dp))

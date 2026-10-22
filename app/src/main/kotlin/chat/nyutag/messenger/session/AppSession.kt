@@ -11,6 +11,7 @@ import android.util.Log
 import chat.nyutag.core.auth.AccountKeeper
 import chat.nyutag.core.auth.Shelf
 import chat.nyutag.core.auth.SignedInAccount
+import chat.nyutag.core.calls.CallEventType
 import chat.nyutag.core.calls.CallCenter
 import chat.nyutag.core.calls.CallEnvironment
 import chat.nyutag.core.calls.CallMessage
@@ -31,6 +32,11 @@ import chat.nyutag.core.net.MatrixError
 import chat.nyutag.core.nyutag.IssuedInvite
 import chat.nyutag.core.nyutag.InviteCode
 import chat.nyutag.core.nyutag.NyutagService
+import chat.nyutag.core.push.PushPreview
+import chat.nyutag.core.push.PushReader
+import chat.nyutag.core.push.ensureRingPushRule
+import chat.nyutag.core.push.registerAndroidPush
+import chat.nyutag.core.push.removeAndroidPush
 import chat.nyutag.core.rooms.AccountDevice
 import chat.nyutag.core.rooms.ChatDigest
 import chat.nyutag.core.rooms.ChatFeed
@@ -51,6 +57,7 @@ import chat.nyutag.core.rooms.createDirectRoom
 import chat.nyutag.core.rooms.createRoom
 import chat.nyutag.core.rooms.deleteDevice
 import chat.nyutag.core.rooms.devices
+import chat.nyutag.core.rooms.event
 import chat.nyutag.core.rooms.join
 import chat.nyutag.core.rooms.knock
 import chat.nyutag.core.rooms.leave
@@ -95,16 +102,21 @@ import chat.nyutag.messenger.data.Pictures
 import chat.nyutag.messenger.doors.DoorHub
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class AppSession(context: Context, private val doors: DoorHub) {
     enum class Phase { LAUNCHING, SIGNED_OUT, SIGNED_IN }
@@ -166,6 +178,12 @@ class AppSession(context: Context, private val doors: DoorHub) {
 
     /** Флаги без секретов: карточка «старые сообщения закрыты» должна пережить перезапуск. */
     private val flags = context.getSharedPreferences("nyutag.history", Context.MODE_PRIVATE)
+    /** Токен FCM этого телефона: нужен и при входе, и при выходе, когда Firebase уже может не ответить. */
+    private val pushFlags = context.getSharedPreferences("nyutag.push", Context.MODE_PRIVATE)
+    /** Чат, открытый на экране, пока приложение видно: его пуши не показываем. */
+    @Volatile var visibleRoom: String? = null
+    /** Шифрование этого входа поднято (или не поднялось): пуш расшифровывает той же машиной, что и список. */
+    @Volatile private var cryptoReady = CompletableDeferred<Unit>()
     /** Пароль этого входа, пока история под старым ключом: ключ сразу перезапрёт хранилище паролем. */
     @Volatile private var heldPassword: String? = null
 
@@ -216,6 +234,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
 
     suspend fun signOut() {
         val account = account ?: return
+        pushFlags.getString("token", null)?.let { token ->
+            runCatching { account.client.removeAndroidPush(token, BuildConfig.DEBUG) }.onFailure { log("пушер не снят: $it") }
+        }
         stop()
         withContext(Dispatchers.IO) { keeper.signOut(account) }
         clear()
@@ -299,6 +320,7 @@ class AppSession(context: Context, private val doors: DoorHub) {
         scope.launch { myAvatarFlow.value = profile(account.session.userID)?.avatarURL?.ifEmpty { null } }
         val engine = SyncEngine(account.client, account.store, account.session, scope)
         this.engine = engine
+        cryptoReady = CompletableDeferred()
         phaseFlow.value = Phase.SIGNED_IN
         refresh()
         try {
@@ -320,8 +342,10 @@ class AppSession(context: Context, private val doors: DoorHub) {
             // Без машины переписка в шифрованных чатах остаётся под замком, остальное работает.
             log("машина шифрования не поднялась: $e")
         }
+        cryptoReady.complete(Unit)
         log("это устройство ${account.session.deviceID}")
         startCalls(account)
+        askPushToken()
         pump = scope.launch {
             engine.updates.collect { update ->
                 absorbCalls(update.response)
@@ -348,6 +372,85 @@ class AppSession(context: Context, private val doors: DoorHub) {
         avatarMemory.evictAll()
     }
 
+    // MARK: Пуши
+
+    /** Токен у Firebase просим при каждом входе: он мог смениться, пока приложение было закрыто. */
+    private fun askPushToken() {
+        runCatching { FirebaseMessaging.getInstance().token.addOnSuccessListener { pushToken(it) } }
+            .onFailure { log("Firebase не настроен, пушей не будет: $it") }
+    }
+
+    /** Новый токен FCM: пушер на сервере пишем сразу, повторная запись того же токена ничего не плодит. */
+    fun pushToken(token: String) {
+        pushFlags.edit().putString("token", token).apply()
+        val account = account ?: return
+        scope.launch {
+            runCatching {
+                account.client.registerAndroidPush(token, BuildConfig.DEBUG, deviceName, java.util.Locale.getDefault().language)
+                account.client.ensureRingPushRule()
+            }.onSuccess { log("пушер записан") }.onFailure { log("пушер не записан: $it") }
+        }
+    }
+
+    /** Что показать по пушу. Процесс мог быть убит: вход поднимаем из хранилища, синхронизация тоже пойдёт
+     *  (по ней придёт и звонок). `null` — показывать нечего: вышли, чат открыт, заглушён, сигнал звонка. */
+    suspend fun pushPreview(roomID: String, eventID: String): PushPreview? {
+        launch()
+        if (phaseFlow.first { it != Phase.LAUNCHING } != Phase.SIGNED_IN) return null
+        val account = account ?: return null
+        if (roomID == visibleRoom || roomID in muted) return null
+        val began = System.currentTimeMillis()
+        // В фоне дверь могла запереться, а цикл /sync — уснуть в паузе после ошибок: будим обоих сразу.
+        doors.pushArrived()
+        withTimeoutOrNull(5_000) { cryptoReady.await() }
+        engine?.wake()
+        val event = withContext(Dispatchers.IO) { runCatching { account.store.event(eventID) }.getOrNull() }
+            ?: pushEvent(account, roomID, eventID) ?: return neutralPreview(roomID, eventID)
+        if (event.sender == account.session.userID || event.sender in ignored) return null
+        var clear = if (event.type == EventType.ENCRYPTED) open(event, roomID) else event
+        // Ключ сессии нового устройства собеседника часто идёт следующей синхронизацией после самого сообщения.
+        while (clear == null) {
+            val left = began + 14_000 - System.currentTimeMillis()
+            val seen = revisionFlow.value
+            if (left <= 0 || withTimeoutOrNull(left) { revisionFlow.first { it != seen } } == null) break
+            clear = open(event, roomID)
+        }
+        log("пуш: ${if (clear == null) "не раскрыт" else "раскрыт"} через ${System.currentTimeMillis() - began} мс")
+        val kind = if (clear == null) PushPreview.Kind.Locked else PushReader.kind(clear, account.session.userID)
+        if (kind == PushPreview.Kind.Signal && clear?.type == CallEventType.RING) {
+            // Звонок: держим процесс, пока синхронизация не донесёт его до стойки — она сама покажет входящий.
+            val rung = withTimeoutOrNull(10_000) { calls.current.first { it != null } } != null
+            log("пуш звонка: ${if (rung) "звонок на стойке" else "звонок не дошёл"}")
+        }
+        if (kind == PushPreview.Kind.Signal || kind == PushPreview.Kind.Other) return null
+        val (record, senderName) = withContext(Dispatchers.IO) {
+            runCatching { account.store.room(roomID) }.getOrNull() to
+                event.sender?.let { runCatching { account.store.state(roomID, EventType.MEMBER, it)?.get("displayname")?.string }.getOrNull() }
+        }
+        return PushPreview(roomID, eventID, event.sender, senderName ?: event.sender?.let(ChatDigest::localpart),
+                           title(roomID).ifEmpty { record?.name }, record?.isDirect ?: false, kind)
+    }
+
+    /** Событие не прочитали (нет связи, вышло время): как iOS, показываем «Новое сообщение» с названием чата. */
+    fun neutralPreview(roomID: String, eventID: String): PushPreview? {
+        if (roomID == visibleRoom || roomID in muted) return null
+        val record = account?.let { runCatching { it.store.room(roomID) }.getOrNull() }
+        return PushPreview(roomID, eventID, null, null, title(roomID).ifEmpty { record?.name }, record?.isDirect ?: false,
+                           PushPreview.Kind.Locked)
+    }
+
+    /** Событие пуша с сервера: короткие попытки, снятая попытка рвёт соединение — висящее из пула не держит до конца. */
+    private suspend fun pushEvent(account: SignedInAccount, roomID: String, eventID: String): Event? {
+        repeat(3) { attempt ->
+            if (attempt > 0) delay(1_000)
+            doors.appBecameActive()  // гонка не удалась (сеть процесса, поднятого пушем, просыпается не сразу) — новая
+            withTimeoutOrNull(5_000) {
+                runCatching { account.client.event(roomID, eventID) }.onFailure { log("событие пуша: $it") }.getOrNull()
+            }?.let { return it }
+        }
+        log("событие пуша не пришло")
+        return null
+    }
     // MARK: Старая история
 
     /** Пароль этого входа ещё в памяти: ключ сразу перезапрёт хранилище, и на следующих устройствах хватит пароля. */

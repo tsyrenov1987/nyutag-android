@@ -13,12 +13,17 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withTimeoutOrNull
 
 class SyncUpdate(
     val response: SyncResponse,
@@ -56,6 +61,8 @@ class SyncEngine(
     var longPollTimeoutMillis = 30_000L
     /** Задержка после сетевой ошибки: 1, 2, 4 … до 60 с. */
     private var backoffMillis = 1_000L
+    /** Побудка цикла (пуш): прервать паузу или висящий long-poll и сразу спросить сервер без ожидания. */
+    private val wakeUp = Channel<Unit>(Channel.CONFLATED)
 
     // MARK: Подписка
 
@@ -90,10 +97,20 @@ class SyncEngine(
         return apply(response, isInitial = since == null)
     }
 
+    /** Пуш пришёл: ключи и сообщение уже на сервере, ждать паузы после ошибки или конца long-poll некогда. */
+    fun wake() {
+        wakeUp.trySend(Unit)
+    }
+
     private suspend fun loop() {
+        var quick = false
         while (true) {
             try {
-                syncOnce(longPollTimeoutMillis)
+                if (!pollOnce(if (quick) 0 else longPollTimeoutMillis)) {
+                    quick = true
+                    continue
+                }
+                quick = false
                 backoffMillis = 1_000
                 stateFlow.value = State.Running
             } catch (e: CancellationException) {
@@ -105,10 +122,25 @@ class SyncEngine(
                     return
                 }
                 stateFlow.value = State.WaitingForNetwork(e.kind.toString())
-                delay(backoffMillis)
-                backoffMillis = minOf(backoffMillis * 2, 60_000)
+                quick = withTimeoutOrNull(backoffMillis) { wakeUp.receive() } != null
+                backoffMillis = if (quick) 1_000 else minOf(backoffMillis * 2, 60_000)
             }
         }
+    }
+
+    /** Один запрос цикла; `false` — разбудили посреди ожидания ответа, запрос снят, ответа нет. Применение
+     *  ответа не прерывается: побудка во время записи в хранилище просто ждёт следующего круга. */
+    private suspend fun pollOnce(timeoutMillis: Long): Boolean {
+        val since = store.syncToken
+        val response = coroutineScope {
+            val call = async { client.sync(since, if (since == null) SyncFilter.initial() else SyncFilter.incremental(), timeoutMillis) }
+            select<SyncResponse?> {
+                call.onAwait { it }
+                wakeUp.onReceive { call.cancel(); null }
+            }
+        } ?: return false
+        apply(response, isInitial = since == null)
+        return true
     }
 
     // MARK: Применение

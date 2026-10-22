@@ -10,8 +10,17 @@ import chat.nyutag.core.sync.SyncFilter
 import chat.nyutag.core.sync.SyncResponse
 import chat.nyutag.core.sync.SyncUpdate
 import chat.nyutag.json.JsonValue
+import chat.nyutag.core.net.HttpRequest
+import chat.nyutag.core.net.HttpResponse
+import chat.nyutag.core.net.Transport
 import java.net.URI
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -129,5 +138,31 @@ class SyncTest {
         val filter = SyncFilter.initial(20).canonical()
         assertTrue(filter.contains("\"limit\":20"))
         assertFalse(filter.contains(" "))
+    }
+
+    /** Пуш будит цикл: висящий long-poll снимается, и сразу уходит /sync без ожидания (timeout=0). */
+    @Test fun wakeCancelsLongPollAndAsksAtOnce() = runBlocking {
+        val asked = ArrayList<String>()
+        val quick = CompletableDeferred<Unit>()
+        val transport = object : Transport {
+            override suspend fun send(request: HttpRequest): HttpResponse {
+                val query = request.url.rawQuery.orEmpty()
+                synchronized(asked) { asked += query }
+                if ("timeout=30000" in query) awaitCancellation()
+                quick.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        val client = MatrixClient(URI("http://127.0.0.1:1"), "t", transport = transport)
+        val scope = CoroutineScope(Dispatchers.Default)
+        val engine = SyncEngine(client, Store(JdbcSql.inMemory()), Session("@a:nyutag.chat", "D", "t", client.homeserver), scope)
+        engine.start()
+        withTimeout(5_000) { while (synchronized(asked) { asked.isEmpty() }) kotlinx.coroutines.delay(10) }
+        engine.wake()
+        withTimeout(5_000) { quick.await() }
+        scope.cancel()
+        assertEquals(2, asked.size)
+        assertTrue("timeout=30000" in asked[0])
+        assertTrue("timeout=0" in asked[1])
     }
 }

@@ -32,9 +32,11 @@ import chat.nyutag.core.crypto.sendEncrypted
 import chat.nyutag.core.net.Door
 import chat.nyutag.core.net.MatrixClient
 import chat.nyutag.core.rooms.send
+import chat.nyutag.core.store.RoomRecord
 import chat.nyutag.core.store.Store
 import chat.nyutag.core.sync.EventType
 import chat.nyutag.core.sync.SyncEngine
+import chat.nyutag.json.JsonValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -81,6 +83,17 @@ class LiveCallPeerTest {
             println("peer: личных комнат с $with: ${direct.size}" +
                     direct.joinToString("") { "\n  ${it.id} шифр=${it.isEncrypted}" })
             if (mode == "rooms") return@runBlocking
+            if (mode == "say") {
+                // Проверка пушей: текст в комнату по названию — только в тестовую «Проверку групповых звонков».
+                val name = env["NYUTAG_PEER_ROOM"] ?: "Проверка групповых звонков"
+                assumeTrue(name == "Проверка групповых звонков", "писать можно только в тестовую комнату")
+                val target = store.rooms(RoomRecord.Membership.JOIN).firstOrNull { it.name == name } ?: error("нет комнаты «$name»")
+                val content = JsonValue.of("msgtype" to "m.text", "body" to (env["NYUTAG_PEER_TEXT"] ?: "Проверка пуша"))
+                val id = if (target.isEncrypted) machine.sendEncrypted(target.id, EventType.MESSAGE, content)
+                         else client.send(target.id, EventType.MESSAGE, content)
+                println("peer: сообщение ушло $id в ${target.id} шифр=${target.isEncrypted}")
+                return@runBlocking
+            }
             val room = direct.firstOrNull() ?: error("нет личной комнаты с $with")
 
             val video = EchoVideo()

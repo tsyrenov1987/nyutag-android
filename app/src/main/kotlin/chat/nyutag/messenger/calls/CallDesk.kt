@@ -72,6 +72,7 @@ class CallDesk(private val context: Context) {
     /** Звук текущего звонка: через него переключается громкая связь. */
     @Volatile private var voice: DeviceVoice? = null
     private val ringer = Ringer(context)
+    private val notice = RingNotice(context)
 
     /** Имя собеседника по комнате; участника группового — по комнате и пользователю. */
     var name: (String, String) -> String = { _, peer -> peer }
@@ -192,6 +193,7 @@ class CallDesk(private val context: Context) {
             session.phases.takeWhile { phase ->
                 phaseFlow.value = phase
                 ringer.follow(phase)
+                notice.follow(phase, peerNameFlow.value, session.video)
                 // Видеозвонок держат перед собой, а не у уха: сразу громкая связь, как на iOS.
                 if (phase is CallPhase.Live && session.video && !loud) {
                     loud = true
@@ -202,6 +204,7 @@ class CallDesk(private val context: Context) {
             }.collect {}
             phaseFlow.value = session.phase
             ringer.follow(session.phase)
+            notice.follow(session.phase, peerNameFlow.value, session.video)
             CallService.stop(context)
             session.stats?.let { log("звонок итог: ушло ${it.sent}, пришло ${it.received}, сыграно ${it.played}, потеряно ${it.lost}") }
             // Итог висит на экране недолго, потом экран уходит.
@@ -322,6 +325,55 @@ class CallDesk(private val context: Context) {
             if (vibrating) vibrator?.cancel()
             vibrating = false
         }
+    }
+}
+
+/** Входящий, пока звенит: уведомление высокой важности с полноэкранным окном — на запертом телефоне сразу экран
+ *  звонка, в фоне — баннер. Звук и вибрацию даёт [CallDesk.Ringer], канал молчит, чтобы не звенеть дважды. */
+private class RingNotice(private val context: Context) {
+    private val manager = context.getSystemService(android.app.NotificationManager::class.java)
+    private var shown = false
+
+    fun follow(phase: CallPhase?, peer: String, video: Boolean) {
+        if (phase == CallPhase.Ringing) show(peer, video) else hide()
+    }
+
+    private fun show(peer: String, video: Boolean) {
+        if (shown) return
+        shown = true
+        val words = chat.nyutag.messenger.ui.Words((context.applicationContext as chat.nyutag.messenger.NyutagApp).prefs)
+        manager.createNotificationChannel(
+            android.app.NotificationChannel(CHANNEL, words(P.callIncoming), android.app.NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null)
+                enableVibration(false)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            })
+        val open = android.app.PendingIntent.getActivity(
+            context, 1, Intent(context, chat.nyutag.messenger.MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = android.app.Notification.Builder(context, CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+            .setContentTitle(peer.ifEmpty { "Нютаг" })
+            .setContentText(words(if (video) P.callVideoAction else P.callIncoming))
+            .setCategory(android.app.Notification.CATEGORY_CALL)
+            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setContentIntent(open)
+            .setFullScreenIntent(open, true)
+            .build()
+        runCatching { manager.notify(ID, notification) }
+    }
+
+    private fun hide() {
+        if (!shown) return
+        shown = false
+        manager.cancel(ID)
+    }
+
+    private companion object {
+        const val CHANNEL = "ring"
+        const val ID = 2
     }
 }
 

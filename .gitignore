@@ -9,6 +9,8 @@ local.properties
 # Секреты: ключ двери и адреса дверей лежат только локально (образец рядом: *.example)
 app/src/main/assets/nyutag-catalogue.txt
 tools/test-env.local.sh
+# Firebase проекта nyutag-ee141 (копия из ~/Nyutag-secrets/firebase/google-services-release.json)
+app/google-services.json
 
 # Системное
 .DS_Store

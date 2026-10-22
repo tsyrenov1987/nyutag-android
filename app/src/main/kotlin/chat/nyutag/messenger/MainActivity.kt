@@ -2,9 +2,15 @@
 
 package chat.nyutag.messenger
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -24,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import chat.nyutag.core.calls.CallPhase
 import chat.nyutag.messenger.session.AppSession
 import chat.nyutag.messenger.ui.CallScreen
 import chat.nyutag.messenger.ui.CallStrip
@@ -43,6 +50,11 @@ import chat.nyutag.messenger.ui.Words
 
 class MainActivity : ComponentActivity() {
     private val app get() = application as NyutagApp
+    /** Чат из нажатого уведомления: откроется, как только вход поднимется. */
+    private val pushedRoom = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    /** Чат на экране; сессии он нужен, только пока окно видно. */
+    private var shownRoom: String? = null
+    private var visible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +63,7 @@ class MainActivity : ComponentActivity() {
         val session = app.session
         session.launch()
         val wallpapers = Wallpapers(applicationContext)
+        pushedRoom.value = intent?.getStringExtra(OPEN_ROOM)
         setContent {
             NyutagTheme {
                 CompositionLocalProvider(LocalWords provides words, LocalAvatars provides session,
@@ -65,8 +78,35 @@ class MainActivity : ComponentActivity() {
                         if (phase == AppSession.Phase.SIGNED_IN) entry = Entry.SIGN_IN
                         if (phase == AppSession.Phase.SIGNED_OUT) { tab = 0; community = null }
                     }
+                    val pushed by pushedRoom.collectAsState()
+                    LaunchedEffect(pushed, phase) {
+                        val room = pushed ?: return@LaunchedEffect
+                        if (phase != AppSession.Phase.SIGNED_IN) return@LaunchedEffect
+                        openRoom = room
+                        pushedRoom.value = null
+                    }
+                    LaunchedEffect(openRoom) {
+                        shownRoom = openRoom
+                        if (visible) session.visibleRoom = openRoom
+                        openRoom?.let { app.notices.clear(it) }
+                    }
+                    // Android 13+: уведомления только с разрешения; спрашиваем один раз после входа.
+                    val askNotices = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+                    LaunchedEffect(phase) {
+                        if (phase != AppSession.Phase.SIGNED_IN || Build.VERSION.SDK_INT < 33) return@LaunchedEffect
+                        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return@LaunchedEffect
+                        if (app.prefs.get("nyutag.noticesAsked") != null) return@LaunchedEffect
+                        app.prefs.put("nyutag.noticesAsked", "1")
+                        askNotices.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
                     val call by session.calls.current.collectAsState()
                     val folded by session.calls.folded.collectAsState()
+                    // Звонок открывается и поверх запертого экрана; входящий ещё и будит экран.
+                    val callPhase by session.calls.phase.collectAsState()
+                    LaunchedEffect(call != null, callPhase == CallPhase.Ringing) {
+                        setShowWhenLocked(call != null)
+                        setTurnScreenOn(callPhase == CallPhase.Ringing)
+                    }
                     val inCall = call != null && phase == AppSession.Phase.SIGNED_IN
                     Column(Modifier.fillMaxSize()) {
                     // Свёрнутый звонок: полоска сверху забирает отступ строки состояния у экранов под ней.
@@ -96,8 +136,25 @@ class MainActivity : ComponentActivity() {
 
     private enum class Entry { SIGN_IN, SIGN_UP, RESET }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.getStringExtra(OPEN_ROOM)?.let { pushedRoom.value = it }
+    }
+
     override fun onStart() {
         super.onStart()
+        visible = true
+        app.session.visibleRoom = shownRoom
         app.doors.appBecameActive()
+    }
+
+    override fun onStop() {
+        visible = false
+        app.session.visibleRoom = null
+        super.onStop()
+    }
+
+    companion object {
+        const val OPEN_ROOM = "chat.nyutag.messenger.OPEN_ROOM"
     }
 }

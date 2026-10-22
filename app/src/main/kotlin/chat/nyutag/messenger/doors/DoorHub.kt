@@ -169,6 +169,15 @@ class DoorHub(context: Context, private val memory: KeyValueStore) {
         }
     }
 
+    /** Пришёл пуш. Процесс, поднятый пушем, начинает гонку раньше, чем система пускает его в сеть, и её сокеты
+     *  молчат до тайм-аута (Xiaomi, 22.10: все двери «Read timed out» за 8 с, новая гонка — дверь за 3–4 с).
+     *  Поэтому незавершённую гонку начинаем заново. */
+    fun pushArrived() {
+        if (stateFlow.value is State.Up) return appBecameActive()
+        synchronized(this) { race?.cancel(); race = null }
+        startRace()
+    }
+
     /** Ждёт открытой двери не дольше `limitMillis`: вход сразу после запуска не должен упасть, пока идёт гонка. */
     suspend fun waitUntilUp(limitMillis: Long = 20_000): Boolean =
         withTimeoutOrNull(limitMillis) { stateFlow.first { it is State.Up } } != null

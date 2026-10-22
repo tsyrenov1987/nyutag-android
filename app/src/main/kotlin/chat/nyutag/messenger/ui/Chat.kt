@@ -127,6 +127,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val mic = rememberMicAccess()
+    val camera = rememberCameraAccess()
     // Звонить можно один на один и в шифрованную группу; состав комнаты меняется синхронизацией.
     val callKind by produceState(AppSession.CallKind.NONE, roomID, revision) { value = session.callKind(roomID) }
 
@@ -228,6 +229,16 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                        if (granted) scope.launch { session.startCall(roomID) }
                        else Toast.makeText(context, words(P.callMicDenied), Toast.LENGTH_LONG).show()
                    }
+               }),
+               onVideoCall = if (callKind != AppSession.CallKind.DIRECT) null else ({
+                   mic.ask { granted ->
+                       if (!granted) Toast.makeText(context, words(P.callMicDenied), Toast.LENGTH_LONG).show()
+                       // Без камеры звоним всё равно: собеседника видно, себя — нет.
+                       else camera.ask { seen ->
+                           if (!seen) Toast.makeText(context, words(P.callCameraDenied), Toast.LENGTH_LONG).show()
+                           scope.launch { session.startCall(roomID, video = true) }
+                       }
+                   }
                }))
         val rows = remember(items, outbox.toList(), words.lang) { layout(items, outbox.toList(), line, words) }
         // Новая реплика внизу: своя — всегда к ней, чужая — если читатель и так внизу (не листает историю).
@@ -309,7 +320,8 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit, onCall: (() -> Unit)?) {
+private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit, onCall: (() -> Unit)?,
+                   onVideoCall: (() -> Unit)?) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
@@ -328,6 +340,7 @@ private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallp
             if (typing != null) Text(typing, color = palette.sky, fontSize = 13.sp, maxLines = 1)
         }
         if (onCall != null) CallButton(palette.sky, onClick = onCall)
+        if (onVideoCall != null) VideoCallButton(palette.sky, onClick = onVideoCall)
         Box {
             Text("⋯", color = palette.sky, fontSize = 26.sp,
                  modifier = Modifier.clip(CircleShape).clickable { menu = true }.padding(horizontal = 12.dp, vertical = 2.dp))

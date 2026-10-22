@@ -1,7 +1,9 @@
 // Собеседник для проверки звонков на телефоне: второй аккаунт на Маке с тем же движком звонков. Голос не
 // декодирует, а возвращает телефону его же кадры Opus (эхо): телефон слышит себя, счётчики видны с обеих сторон.
+// Видео так же: кадры H.264 телефона уходят обратно, и телефон видит свою камеру на месте собеседника.
 // Запускается только явно: NYUTAG_PEER_USER/NYUTAG_PEER_PASSWORD (не тот аккаунт, что на телефоне) и стенд двери.
 //   NYUTAG_PEER_MODE=rooms — личные комнаты с NYUTAG_PEER_WITH; answer — ждать звонка и принять; dial — позвонить.
+//   NYUTAG_PEER_VIDEO=1 — в режиме dial позвонить с видео.
 
 package chat.nyutag.core
 
@@ -10,6 +12,14 @@ import chat.nyutag.core.auth.logout
 import chat.nyutag.core.calls.CallCenter
 import chat.nyutag.core.calls.CallEnvironment
 import chat.nyutag.core.calls.CallMessage
+import chat.nyutag.core.calls.VideoCodecs
+import chat.nyutag.core.calls.VideoDecoder
+import chat.nyutag.core.calls.VideoEncoder
+import chat.nyutag.core.calls.VideoFormat
+import chat.nyutag.core.calls.VideoFrame
+import chat.nyutag.core.calls.VideoPicture
+import chat.nyutag.core.calls.VideoPipe
+import chat.nyutag.core.calls.VideoSource
 import chat.nyutag.core.calls.VoiceCodecs
 import chat.nyutag.core.calls.VoiceDecoder
 import chat.nyutag.core.calls.VoiceEncoder
@@ -73,6 +83,7 @@ class LiveCallPeerTest {
             if (mode == "rooms") return@runBlocking
             val room = direct.firstOrNull() ?: error("нет личной комнаты с $with")
 
+            val video = EchoVideo()
             val callEnv = CallEnvironment(
                 me = session.userID, deviceID = session.deviceID,
                 post = { signal, roomID ->
@@ -86,6 +97,8 @@ class LiveCallPeerTest {
                 openTransport = { slot -> RelayLink.open(client, slot) },
                 makeVoice = { EchoVoice() },
                 codecs = PassCodecs,
+                videoCodecs = video,
+                makeCamera = { video },
             )
             val center = CallCenter(callEnv)
             val fresh = { System.currentTimeMillis() - 120_000 }
@@ -107,7 +120,7 @@ class LiveCallPeerTest {
             }
             engine.start()
             val call = if (mode == "dial") {
-                requireNotNull(center.dial(room.id, with))
+                requireNotNull(center.dial(room.id, with, video = env["NYUTAG_PEER_VIDEO"] != null))
             } else {
                 println("peer: жду звонка ${seconds} с")
                 withTimeoutOrNull(seconds * 1_000) { center.incoming.receive() }?.also {
@@ -120,6 +133,7 @@ class LiveCallPeerTest {
             while (System.currentTimeMillis() < until && !call.phase.isEnded) {
                 if (call.phase != last) { last = call.phase; println("peer: фаза ${call.phase}") }
                 call.stats?.let { println("peer: ушло ${it.sent}, пришло ${it.received}, сыграно ${it.played}, потеряно ${it.lost}") }
+                call.videoStats?.let { println("peer: видео $it") }
                 delay(2_000)
             }
             println("peer: итог ${call.phase}")
@@ -131,6 +145,40 @@ class LiveCallPeerTest {
             scope.cancel()
             client.logout()
         }
+    }
+
+    /** Видео-эхо: «декодер» отдаёт пришедший кадр «кодировщику», просьбу о ключевом кадре — телефону. Кодировщик
+     *  заводится пустым кадром «камеры», когда пришёл первый кадр: к тому времени камера уже включена. */
+    private class EchoVideo : VideoCodecs, VideoSource {
+        @Volatile private var output: ((VideoFrame) -> Unit)? = null
+        @Volatile private var pipe: VideoPipe? = null
+        private val blank = ByteArray(VideoFormat.WIDTH * VideoFormat.HEIGHT).let {
+            VideoPicture(VideoFormat.WIDTH, VideoFormat.HEIGHT, it, it, it, 0)
+        }
+
+        override fun encoder(output: (VideoFrame) -> Unit) = object : VideoEncoder {
+            init { this@EchoVideo.output = output }
+            override fun encode(picture: VideoPicture) {}
+            override fun requestKeyframe() { pipe?.askKeyframe() }
+            override fun setBitRate(value: Int) {}
+            override fun close() { this@EchoVideo.output = null }
+        }
+
+        override fun decoder(shown: (Int, Int) -> Unit) = object : VideoDecoder {
+            override fun decode(frame: VideoFrame): Boolean {
+                if (output == null) pipe?.capture(blank)
+                output?.invoke(frame)
+                shown(VideoFormat.WIDTH, VideoFormat.HEIGHT)
+                return true
+            }
+            override fun close() {}
+        }
+
+        override fun start(pipe: VideoPipe) {
+            this.pipe = pipe
+        }
+
+        override fun stop() { pipe = null }
     }
 
     /** Кадр Opus как есть: длина в первом отсчёте, байты в следующих. Пустой кадр — тишина Opus (CELT 20 мс). */

@@ -375,5 +375,9 @@ object P {
     val callGroupAction = Phrase(bxr = "Бүлэгөөр залгаха", ru = "Групповой звонок", en = "Group call")
     val callGroupWaiting = Phrase(bxr = "Хабаадагшадые хүлеэжэ байна…", ru = "Ждём участников…", en = "Waiting for others…")
     val callGroupMembers = Phrase(bxr = "Хабаадагшад:", ru = "Участников:", en = "Participants:")
+    val callVideoAction = Phrase(bxr = "Видео залгаха", ru = "Видеозвонок", en = "Video call")
+    val callCamera = Phrase(bxr = "Камера", ru = "Камера", en = "Camera")
+    val callFlip = Phrase(bxr = "Камера һэлгэхэ", ru = "Сменить камеру", en = "Switch camera")
+    val callCameraDenied = Phrase(bxr = "Камера хаагдаатай. Тохиргоо соо Нютагта зүбшөөрэгты.", ru = "Нет доступа к камере. Разрешите её Нютагу в Настройках.", en = "No camera access. Allow it for Nyutag in Settings.")
     val callMicDenied = Phrase(bxr = "Микрофон хаагдаатай. Тохиргоо соо Нютагта зүбшөөрэгты.", ru = "Нет доступа к микрофону. Разрешите его Нютагу в Настройках.", en = "No microphone access. Allow it for Nyutag in Settings.")
 }

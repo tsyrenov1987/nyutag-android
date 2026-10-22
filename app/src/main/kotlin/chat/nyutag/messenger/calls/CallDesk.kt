@@ -1,4 +1,4 @@
-// Нютаг. Стойка звонков для экрана: какой звонок идёт, его фаза, участники группового, микрофон и громкая связь.
+// Нютаг. Стойка звонков для экрана: какой звонок идёт, его фаза, участники группового, микрофон, громкая связь и камера.
 // Входящий звенит мелодией телефона с вибрацией, исходящий — гудками. Идущий звонок держит службу переднего плана:
 // без неё система глушит микрофон, когда экран гаснет или приложение уходит в фон.
 
@@ -18,6 +18,7 @@ import chat.nyutag.core.calls.CallCenter
 import chat.nyutag.core.calls.CallMessage
 import chat.nyutag.core.calls.CallPhase
 import chat.nyutag.core.calls.CallSession
+import chat.nyutag.core.calls.VideoSink
 import chat.nyutag.messenger.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,17 @@ class CallDesk(private val context: Context) {
     private val foldedFlow = MutableStateFlow(false)
     /** Звонок свёрнут в полоску над приложением: можно переписываться, не кладя трубку. */
     val folded: StateFlow<Boolean> get() = foldedFlow
+    private val cameraOnFlow = MutableStateFlow(false)
+    val cameraOn: StateFlow<Boolean> get() = cameraOnFlow
+    private val remoteVisibleFlow = MutableStateFlow(false)
+    /** Видео собеседника идёт: вместо аватара — его картинка. */
+    val remoteVisible: StateFlow<Boolean> get() = remoteVisibleFlow
+    private val previewFlow = MutableStateFlow<CameraPreview?>(null)
+    /** Своя камера маленькой картинкой в углу. */
+    val preview: StateFlow<CameraPreview?> get() = previewFlow
+    /** Когда собеседник последний раз показал кадр (мс от загрузки); 0 — ещё не показывал. */
+    @Volatile private var lastShown = 0L
+    private var videoWatch: Job? = null
 
     private var center: CallCenter? = null
     private var listener: Job? = null
@@ -67,6 +79,12 @@ class CallDesk(private val context: Context) {
     fun makeVoice(): DeviceVoice = DeviceVoice(context).also {
         it.setSpeaker(speakerFlow.value)
         voice = it
+    }
+
+    /** Без разрешения камеры — `null`: звонок идёт без своего видео. */
+    fun makeCamera(): DeviceCamera? {
+        if (!cameraAllowed(context)) return null
+        return DeviceCamera(context, previewFlow)
     }
 
     fun attach(center: CallCenter) {
@@ -95,11 +113,13 @@ class CallDesk(private val context: Context) {
         center.absorb(message)
     }
 
-    /** Позвонить один на один. Микрофон разрешает экран заранее. */
-    suspend fun dial(roomID: String, peer: String) {
+    /** Позвонить один на один. Микрофон и камеру разрешает экран заранее; без камеры видеозвонок идёт без своей картинки. */
+    suspend fun dial(roomID: String, peer: String, video: Boolean = false) {
         val center = center ?: return
         if (currentFlow.value != null) return
-        center.dial(roomID, peer)?.let { show(it) }
+        val session = center.dial(roomID, peer, video) ?: return
+        show(session)
+        if (video && !cameraAllowed(context)) setCamera(false)
     }
 
     suspend fun dialGroup(roomID: String) {
@@ -110,6 +130,7 @@ class CallDesk(private val context: Context) {
 
     suspend fun accept() {
         val session = currentFlow.value ?: return
+        if (session.video && !cameraAllowed(context)) setCamera(false)
         CallService.start(context, peerNameFlow.value)
         session.accept()
     }
@@ -128,6 +149,22 @@ class CallDesk(private val context: Context) {
         voice?.setSpeaker(on)
     }
 
+    /** Включить или выключить свою камеру; разрешение спрашивает экран до вызова. */
+    fun setCamera(on: Boolean) {
+        val session = currentFlow.value ?: return
+        if (session.group) return
+        val wanted = on && cameraAllowed(context)
+        cameraOnFlow.value = wanted
+        // Служба переднего плана должна знать про камеру, иначе в фоне система её отнимет.
+        if (wanted && session.phase.let { it is CallPhase.Live || it == CallPhase.Connecting }) CallService.start(context, peerNameFlow.value)
+        scope.launch { session.setCamera(wanted) }
+    }
+
+    fun switchCamera() {
+        val session = currentFlow.value ?: return
+        scope.launch { session.switchCamera() }
+    }
+
     fun setFolded(folded: Boolean) {
         foldedFlow.value = folded && phaseFlow.value.let { it == CallPhase.Calling || it == CallPhase.Connecting || it is CallPhase.Live }
     }
@@ -139,15 +176,26 @@ class CallDesk(private val context: Context) {
         speakerFlow.value = false
         foldedFlow.value = false
         membersFlow.value = emptyList()
+        cameraOnFlow.value = session.video
+        remoteVisibleFlow.value = false
+        previewFlow.value = null
         voice = null
         if (session.isCaller) CallService.start(context, peerNameFlow.value)
         memberWatch?.cancel()
         if (session.group) memberWatch = watchMembers(session)
+        videoWatch?.cancel()
+        if (!session.group) videoWatch = watchVideo(session)
         follower?.cancel()
         follower = scope.launch {
+            var loud = false
             session.phases.takeWhile { phase ->
                 phaseFlow.value = phase
                 ringer.follow(phase)
+                // Видеозвонок держат перед собой, а не у уха: сразу громкая связь, как на iOS.
+                if (phase is CallPhase.Live && session.video && !loud) {
+                    loud = true
+                    setSpeaker(true)
+                }
                 log("звонок ${session.callID.take(6)}: $phase")
                 !phase.isEnded
             }.collect {}
@@ -163,6 +211,10 @@ class CallDesk(private val context: Context) {
             foldedFlow.value = false
             membersFlow.value = emptyList()
             memberWatch?.cancel()
+            videoWatch?.cancel()
+            cameraOnFlow.value = false
+            remoteVisibleFlow.value = false
+            previewFlow.value = null
             voice = null
         }
         if (BuildConfig.DEBUG) scope.launch {
@@ -171,6 +223,29 @@ class CallDesk(private val context: Context) {
                 val stats = session.stats ?: continue
                 log("звонок: ушло ${stats.sent}, пришло ${stats.received}, сыграно ${stats.played}, потеряно ${stats.lost}, " +
                     "микрофон ${"%.3f".format(stats.inputLevel)}, динамик ${"%.3f".format(stats.outputLevel)}")
+                session.videoStats?.let { log("видео: $it") }
+            }
+        }
+    }
+
+    /** Кадры собеседника: пошли — показываем его видео; камера выключена или кадров нет 2,5 с — снова аватар. */
+    private fun watchVideo(session: CallSession): Job {
+        lastShown = 0L
+        session.showVideo(VideoSink(
+            remote = { _, _ ->
+                lastShown = android.os.SystemClock.elapsedRealtime()
+                remoteVisibleFlow.value = true
+            },
+            remoteCameraOff = { remoteVisibleFlow.value = false },
+        ))
+        return scope.launch {
+            while (!session.phase.isEnded) {
+                delay(500)
+                if (currentFlow.value !== session) break
+                val last = lastShown
+                if (remoteVisibleFlow.value && last != 0L && android.os.SystemClock.elapsedRealtime() - last > 2_500) {
+                    remoteVisibleFlow.value = false
+                }
             }
         }
     }
@@ -249,7 +324,10 @@ class CallDesk(private val context: Context) {
     }
 }
 
-/** Разговор с выключенным экраном: служба с типом «микрофон», пока идёт звонок. */
+fun cameraAllowed(context: Context) =
+    context.checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+/** Разговор с выключенным экраном: служба с типом «микрофон» (и «камера», если она разрешена), пока идёт звонок. */
 class CallService : android.app.Service() {
     override fun onBind(intent: Intent?) = null
 
@@ -267,7 +345,8 @@ class CallService : android.app.Service() {
             .setOngoing(true)
             .build()
         runCatching {
-            startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            val camera = if (cameraAllowed(this)) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0
+            startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or camera)
         }.onFailure {
             Log.w("calls", "служба звонка не стала службой переднего плана: $it")
             stopSelf()

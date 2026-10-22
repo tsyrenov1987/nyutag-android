@@ -1,18 +1,24 @@
 // Нютаг. Звонок на экране: поверх приложения — входящий с «Принять/Отклонить», исходящий и разговор с таймером;
-// свёрнутый звонок — полоска сверху, по нажатию экран возвращается. Значки нарисованы здесь же, без библиотек.
+// свёрнутый звонок — полоска сверху, по нажатию экран возвращается. В видеозвонке собеседник на весь экран, своя
+// камера — картинка в углу (нажатие меняет камеру). Значки нарисованы здесь же, без библиотек.
 
 package chat.nyutag.messenger.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,11 +26,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -45,9 +54,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -55,17 +67,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import chat.nyutag.core.calls.CallEndReason
 import chat.nyutag.core.calls.CallPhase
 import chat.nyutag.messenger.calls.CallDesk
+import chat.nyutag.messenger.calls.RemoteSurface
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** Разрешение на микрофон перед звонком: `ask(then)` спросит, если надо, и вызовет `then(granted)`. */
+/** Разрешение на микрофон или камеру перед звонком: `ask(then)` спросит, если надо, и вызовет `then(granted)`. */
 class MicAccess(val ask: ((Boolean) -> Unit) -> Unit)
 
 @Composable
-fun rememberMicAccess(): MicAccess {
+fun rememberMicAccess(): MicAccess = rememberAccess(Manifest.permission.RECORD_AUDIO)
+
+@Composable
+fun rememberCameraAccess(): MicAccess = rememberAccess(Manifest.permission.CAMERA)
+
+@Composable
+private fun rememberAccess(permission: String): MicAccess {
     val context = LocalContext.current
     // Колбэк ждёт ответа системы; экрану его показывать не нужно, поэтому не состояние Compose.
     val pending = remember { arrayOfNulls<(Boolean) -> Unit>(1) }
@@ -75,11 +95,11 @@ fun rememberMicAccess(): MicAccess {
     }
     return remember(launcher) {
         MicAccess { then ->
-            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            if (context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
                 then(true)
             } else {
                 pending[0] = then
-                launcher.launch(Manifest.permission.RECORD_AUDIO)
+                launcher.launch(permission)
             }
         }
     }
@@ -97,15 +117,25 @@ fun CallScreen(desk: CallDesk) {
     val members by desk.members.collectAsState()
     val muted by desk.muted.collectAsState()
     val speaker by desk.speaker.collectAsState()
+    val cameraOn by desk.cameraOn.collectAsState()
+    val remoteVisible by desk.remoteVisible.collectAsState()
+    val preview by desk.preview.collectAsState()
     val mic = rememberMicAccess()
+    val camera = rememberCameraAccess()
     var micDenied by remember(session) { mutableStateOf(false) }
+    var cameraDenied by remember(session) { mutableStateOf(false) }
     val talking = phase == CallPhase.Calling || phase == CallPhase.Connecting || phase is CallPhase.Live
+    val direct = session?.group == false
+    val showRemote = direct && remoteVisible && talking
     // «Назад» сворачивает идущий звонок; входящий ждёт ответа.
     BackHandler { if (talking) desk.setFolded(true) }
 
-    Box(Modifier.fillMaxSize()
-            .background(Brush.verticalGradient(listOf(palette.sky, palette.sky.copy(alpha = 0.75f).compositeOver(palette.milk))))
-            .clickable(enabled = false) {}) {
+    Box(Modifier.fillMaxSize().background(Color.Black).clickable(enabled = false) {}) {
+        // Поверхность для видео собеседника живёт весь разговор один на один: декодеру не придётся пересобираться,
+        // когда пойдут кадры. Пока их нет, её закрывает обычный фон.
+        if (direct && talking) RemoteVideo(Modifier.fillMaxSize())
+        if (!showRemote) Box(Modifier.fillMaxSize()
+            .background(Brush.verticalGradient(listOf(palette.sky, palette.sky.copy(alpha = 0.75f).compositeOver(palette.milk)))))
         Column(Modifier.fillMaxSize().systemBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally,
                verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -117,9 +147,11 @@ fun CallScreen(desk: CallDesk) {
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Pillow(session?.roomID ?: "·", peerName, 128.dp)
+            if (!showRemote) Pillow(session?.roomID ?: "·", peerName, 128.dp)
+            // Своё превью в правом углу: имя не должно под него заходить.
             Text(peerName, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                 overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 24.dp))
+                 overflow = TextOverflow.Ellipsis,
+                 modifier = Modifier.padding(horizontal = if (showRemote && cameraOn && preview != null) 128.dp else 24.dp))
             CallStatus(phase, Color.White.copy(alpha = 0.85f), 19)
             if (session?.group == true && talking) {
                 Text(if (members.isEmpty()) words(P.callGroupWaiting) else "${words(P.callGroupMembers)} ${members.size + 1}\n" +
@@ -129,6 +161,10 @@ fun CallScreen(desk: CallDesk) {
             }
             if (micDenied) {
                 Text(words(P.callMicDenied), color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center,
+                     modifier = Modifier.padding(horizontal = 32.dp))
+            }
+            if (cameraDenied) {
+                Text(words(P.callCameraDenied), color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center,
                      modifier = Modifier.padding(horizontal = 32.dp))
             }
             Spacer(Modifier.weight(1f))
@@ -141,16 +177,27 @@ fun CallScreen(desk: CallDesk) {
                         // Без микрофона всё равно принимаем: собеседника хотя бы слышно.
                         mic.ask { granted ->
                             micDenied = !granted
-                            scope.launch { desk.accept() }
+                            if (session?.video != true) scope.launch { desk.accept() }
+                            else camera.ask { seen ->
+                                cameraDenied = !seen
+                                scope.launch { desk.accept() }
+                            }
                         }
                     }) { handset(Color.White, down = false) }
                 }
-                talking -> Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                talking -> Row(horizontalArrangement = Arrangement.spacedBy(if (direct) 4.dp else 20.dp)) {
                     val off = Color.White.copy(alpha = 0.18f)
                     val sky = palette.sky
                     RoundButton(words(P.callMute), if (muted) Color.White else off, onClick = { desk.setMuted(!muted) }) {
                         microphone(if (muted) sky else Color.White, crossed = muted)
                     }
+                    if (direct) RoundButton(words(P.callCamera), if (cameraOn) Color.White else off, onClick = {
+                        if (cameraOn) desk.setCamera(false)
+                        else camera.ask { seen ->
+                            cameraDenied = !seen
+                            if (seen) desk.setCamera(true)
+                        }
+                    }) { videoCamera(if (cameraOn) sky else Color.White, crossed = !cameraOn) }
                     RoundButton(words(P.callSpeaker), if (speaker) Color.White else off, onClick = { desk.setSpeaker(!speaker) }) {
                         loudspeaker(if (speaker) sky else Color.White)
                     }
@@ -162,11 +209,49 @@ fun CallScreen(desk: CallDesk) {
             }
             Spacer(Modifier.height(40.dp))
         }
+        val shot = preview
+        if (direct && talking && cameraOn && shot != null) {
+            // Своя камера в углу; фронтальная — как в зеркале. Нажатие меняет камеру.
+            Image(shot.bitmap.asImageBitmap(), words(P.callFlip), contentScale = ContentScale.Crop,
+                  modifier = Modifier.align(Alignment.TopEnd).systemBarsPadding().padding(top = 56.dp, end = 16.dp)
+                      .size(105.dp, 140.dp).clip(RoundedCornerShape(12.dp))
+                      .graphicsLayer { if (shot.mirrored) scaleX = -1f }
+                      .clickable { desk.switchCamera() })
+        }
     }
     LaunchedEffect(session) {
         // Разговор без разрешения на микрофон: подсказка, где его включить.
         if (session?.isCaller == true &&
             context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) micDenied = true
+    }
+}
+
+/** Видео собеседника: кадр 3:4 закрывает весь экран, лишнее по краям обрезается. */
+@Composable
+private fun RemoteVideo(modifier: Modifier) {
+    BoxWithConstraints(modifier.clipToBounds(), contentAlignment = Alignment.Center) {
+        val width = maxOf(maxWidth, maxHeight * 0.75f)
+        AndroidView(factory = { context ->
+            TextureView(context).apply {
+                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                    private var surface: Surface? = null
+
+                    override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+                        surface = Surface(texture).also { RemoteSurface.current = it }
+                    }
+
+                    override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                        if (RemoteSurface.current === surface) RemoteSurface.current = null
+                        surface?.release()
+                        surface = null
+                        return true
+                    }
+
+                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {}
+                    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {}
+                }
+            }
+        }, modifier = Modifier.requiredSize(width, width / 0.75f))
     }
 }
 
@@ -227,6 +312,14 @@ private fun RoundButton(caption: String, fill: Color, onClick: () -> Unit, glyph
 fun CallButton(tint: Color, size: Dp = 22.dp, onClick: () -> Unit) {
     Box(Modifier.clip(CircleShape).clickable(onClick = onClick).padding(10.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.size(size)) { handset(tint, down = false) }
+    }
+}
+
+/** Кнопка видеозвонка в шапке чата. */
+@Composable
+fun VideoCallButton(tint: Color, size: Dp = 24.dp, onClick: () -> Unit) {
+    Box(Modifier.clip(CircleShape).clickable(onClick = onClick).padding(10.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(size)) { videoCamera(tint, crossed = false) }
     }
 }
 
@@ -294,6 +387,22 @@ private fun DrawScope.loudspeaker(color: Color) {
     val stroke = Stroke(w * 0.07f, cap = StrokeCap.Round)
     drawArc(color, -45f, 90f, false, Offset(w * 0.38f, h * 0.3f), Size(w * 0.36f, h * 0.4f), style = stroke)
     drawArc(color, -50f, 100f, false, Offset(w * 0.3f, h * 0.14f), Size(w * 0.62f, h * 0.72f), style = stroke)
+}
+
+/** Видеокамера: корпус и раструб объектива справа. */
+private fun DrawScope.videoCamera(color: Color, crossed: Boolean) {
+    val w = size.width
+    val h = size.height
+    drawRoundRect(color, Offset(w * 0.04f, h * 0.26f), Size(w * 0.6f, h * 0.48f), CornerRadius(w * 0.1f))
+    val lens = Path().apply {
+        moveTo(w * 0.68f, h * 0.44f)
+        lineTo(w * 0.96f, h * 0.28f)
+        lineTo(w * 0.96f, h * 0.72f)
+        lineTo(w * 0.68f, h * 0.56f)
+        close()
+    }
+    drawPath(lens, color)
+    if (crossed) drawLine(color, Offset(w * 0.08f, h * 0.08f), Offset(w * 0.92f, h * 0.92f), w * 0.09f, StrokeCap.Round)
 }
 
 private fun DrawScope.chevronDown(color: Color) {

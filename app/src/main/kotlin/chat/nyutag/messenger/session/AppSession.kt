@@ -88,6 +88,7 @@ import chat.nyutag.json.JsonValue
 import chat.nyutag.messenger.BuildConfig
 import chat.nyutag.messenger.calls.CallDesk
 import chat.nyutag.messenger.calls.OpusCodecs
+import chat.nyutag.messenger.calls.H264Codecs
 import chat.nyutag.messenger.data.AndroidSql
 import chat.nyutag.messenger.data.KeystoreVault
 import chat.nyutag.messenger.data.Pictures
@@ -570,9 +571,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
     enum class CallKind { NONE, DIRECT, GROUP }
 
     /** Позвонить в комнату: один на один, если в ней ровно один кроме нас, иначе групповой (только голос). */
-    suspend fun startCall(roomID: String) {
+    suspend fun startCall(roomID: String, video: Boolean = false) {
         when (callKind(roomID)) {
-            CallKind.DIRECT -> callPeer(roomID)?.let { calls.dial(roomID, it) }
+            CallKind.DIRECT -> callPeer(roomID)?.let { calls.dial(roomID, it, video) }
             CallKind.GROUP -> calls.dialGroup(roomID)
             CallKind.NONE -> {}
         }
@@ -607,6 +608,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
             openTransport = { slot -> RelayLink.open(client, slot) },
             makeVoice = { calls.makeVoice() },
             codecs = OpusCodecs,
+            videoCodecs = H264Codecs,
+            makeCamera = { calls.makeCamera() },
         )
         calls.name = { roomID, peer -> title(roomID).ifEmpty { ChatDigest.localpart(peer) } }
         calls.memberName = { roomID, user -> displayName(roomID, user) }

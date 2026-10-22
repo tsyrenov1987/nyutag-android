@@ -48,6 +48,9 @@ class CallEnvironment(
     val openTransport: suspend (String) -> CallTransport?,
     val makeVoice: () -> VoiceIO,
     val codecs: VoiceCodecs,
+    /** Без кодека видео (тесты голоса) звонок идёт только голосом. */
+    val videoCodecs: VideoCodecs? = null,
+    val makeCamera: () -> VideoSource? = { null },
     val ringTimeout: Long = 45_000,
     val connectTimeout: Long = 20_000,
     val lossGrace: Long = 20_000,
@@ -84,6 +87,10 @@ class CallSession internal constructor(
     private var acceptRequested = false
     @Volatile private var pipe: VoicePipe? = null
     private var voice: VoiceIO? = null
+    @Volatile private var videoPipe: VideoPipe? = null
+    private var camera: VideoSource? = null
+    @Volatile private var cameraWanted = this.video
+    @Volatile private var pendingSink: VideoSink? = null
     /** Текущий канал: в него пишет поток захвата звука, меняет его звонок при переподключении. */
     private val outbox = AtomicReference<CallTransport?>(null)
     private var slot: String? = null
@@ -261,6 +268,45 @@ class CallSession internal constructor(
 
     val stats: VoiceStats? get() = pipe?.stats
 
+    val videoStats: VideoStats? get() = videoPipe?.stats
+
+    /** Куда сообщать о картинке собеседника. Можно задать до начала разговора. */
+    fun showVideo(sink: VideoSink?) {
+        pendingSink = sink
+        videoPipe?.sink = sink
+    }
+
+    val cameraOn: Boolean get() = cameraWanted
+
+    suspend fun setCamera(on: Boolean) = confined {
+        cameraWanted = on
+        if (phase.isLive) applyCamera()
+    }
+
+    suspend fun switchCamera() = confined { camera?.switchCamera() }
+
+    private fun applyCamera() {
+        val videoPipe = videoPipe ?: return
+        val current = camera
+        if (cameraWanted && current == null) {
+            val made = env.makeCamera()
+            if (made == null) {
+                cameraWanted = false
+            } else {
+                try {
+                    made.start(videoPipe)
+                    camera = made
+                } catch (e: Exception) {
+                    cameraWanted = false
+                }
+            }
+        } else if (!cameraWanted && current != null) {
+            current.stop()
+            camera = null
+        }
+        videoPipe.cameraOn = cameraWanted && camera != null
+    }
+
     private fun connect(secret: CallSecret) {
         val pipe = VoicePipe.direct(secret, env.codecs) { packet -> outbox.get()?.send(packet) }
         if (pipe == null) {
@@ -268,6 +314,10 @@ class CallSession internal constructor(
             return
         }
         this.pipe = pipe
+        env.videoCodecs?.let { codecs ->
+            videoPipe = VideoPipe(secret, codecs, send = { packet -> outbox.get()?.send(packet) },
+                                  backlog = { outbox.get()?.backlog ?: 0 }).also { it.sink = pendingSink }
+        }
         slot = secret.slot
         openLink()
     }
@@ -302,8 +352,7 @@ class CallSession internal constructor(
     }
 
     private fun deliver(packet: ByteArray) {
-        // Видео — в следующем срезе: пока принимаем только голос.
-        if (group || (packet.isNotEmpty() && packet[0] == FrameKind.AUDIO.code)) pipe?.receive(packet)
+        if (group || (packet.isNotEmpty() && packet[0] == FrameKind.AUDIO.code)) pipe?.receive(packet) else videoPipe?.receive(packet)
         lastHeard = System.nanoTime()
         // Связь вернулась, когда снова пошёл звук, а не когда релей насчитал двоих.
         lossTimer?.let {
@@ -328,6 +377,7 @@ class CallSession internal constructor(
             set(CallPhase.Live(System.currentTimeMillis()))
             lastHeard = System.nanoTime()
             watchSilence()
+            applyCamera()
         } else if (phase.isLive) {
             startLossTimer()
         }
@@ -387,6 +437,9 @@ class CallSession internal constructor(
         set(CallPhase.Ended(reason))
         voice?.stop()
         voice = null
+        camera?.stop()
+        camera = null
+        videoPipe?.close()
         pipe?.close()
         outbox.getAndSet(null)?.close()
         // Конец часто объявляет сам таймер или чтец: гасим их после отправки, иначе отмена оборвёт и её.

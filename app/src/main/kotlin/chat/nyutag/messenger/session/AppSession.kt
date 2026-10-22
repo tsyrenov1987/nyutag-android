@@ -25,6 +25,7 @@ import chat.nyutag.core.rooms.ChatDigest
 import chat.nyutag.core.rooms.ChatFeed
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
+import chat.nyutag.core.rooms.Forwarding
 import chat.nyutag.core.rooms.IgnoredUsers
 import chat.nyutag.core.rooms.MutedRooms
 import chat.nyutag.core.rooms.CreateRoom
@@ -44,6 +45,8 @@ import chat.nyutag.core.rooms.knock
 import chat.nyutag.core.rooms.leave
 import chat.nyutag.core.rooms.publicCommunities
 import chat.nyutag.core.rooms.redact
+import chat.nyutag.core.rooms.report
+import chat.nyutag.core.rooms.setIgnoredUsers
 import chat.nyutag.core.rooms.renameDevice
 import chat.nyutag.core.rooms.roomHierarchy
 import chat.nyutag.core.rooms.setRoomVisibility
@@ -448,6 +451,42 @@ class AppSession(context: Context, private val doors: DoorHub) {
     suspend fun toggleReaction(roomID: String, item: FeedItem, key: String): Boolean {
         item.reactions.firstOrNull { it.key == key }?.myEventID?.let { return delete(roomID, it) }
         return post(EventType.REACTION, Relations.reaction(item.id, key), roomID, TransactionID.make()) != null
+    }
+
+    /** Переслать реплику в другой чат. Берём её из базы (расшифровав), правленый текст — как его видно в ленте. */
+    suspend fun forward(item: FeedItem, roomID: String, target: String): String? {
+        val account = account ?: return null
+        val stored = withContext(Dispatchers.IO) { runCatching { account.store.event(item.id) }.getOrNull() } ?: return null
+        val event = if (stored.type == EventType.ENCRYPTED) open(stored, roomID) ?: return null else stored
+        val text = (item.body as? FeedItem.Body.Text)?.text
+        val replaced = if (item.edited && text != null) JsonValue.of("msgtype" to "m.text", "body" to text) else null
+        val out = Forwarding.content(event, replaced) ?: return null
+        val eventID = post(out.type, out.content, target, TransactionID.make())
+        log("пересылка ${if (eventID == null) "не прошла" else "ушла"}")
+        return eventID
+    }
+
+    /** Чат «Избранное», если он уже заведён: в выборе чата для пересылки он первым. */
+    val savedRoomID: String? get() = account?.let { runCatching { SavedMessages.load(it.store) }.getOrNull() }
+
+    /** Жалоба администратору сервера на сообщение. */
+    suspend fun report(roomID: String, eventID: String, reason: String): Boolean {
+        val account = account ?: return false
+        return runCatching { account.client.report(roomID, eventID, reason) }.onFailure { log("жалоба не прошла: $it") }.isSuccess
+    }
+
+    /** Заблокировать или разблокировать человека: его реплики прячутся сразу, сервер перестаёт их присылать. */
+    suspend fun setBlocked(userID: String, blocked: Boolean): Boolean {
+        val account = account ?: return false
+        val me = me ?: return false
+        val users = if (blocked) ignored + userID else ignored - userID
+        if (users == ignored) return true
+        val ok = runCatching { account.client.setIgnoredUsers(users, me, account.store) }.onFailure { log("блокировка не прошла: $it") }.isSuccess
+        if (!ok) return false
+        ignored = users
+        refresh()
+        revisionFlow.value += 1
+        return true
     }
 
     /** Событие в комнату; в шифрованную — через машину. */

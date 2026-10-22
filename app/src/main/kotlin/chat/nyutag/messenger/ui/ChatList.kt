@@ -72,7 +72,7 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
 }
 
 @Composable
-private fun ChatRow(line: ChatLine, typingIDs: List<String>?, words: Words, onClick: () -> Unit) {
+internal fun ChatRow(line: ChatLine, typingIDs: List<String>?, words: Words, onClick: () -> Unit) {
     val palette = LocalPalette.current
     val typing = typingIDs?.firstOrNull()?.let { if (line.isDirect) words(P.typingNow) else words(P.typingName, ChatDigest.localpart(it)) }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card).clickable(onClick = onClick).padding(12.dp),

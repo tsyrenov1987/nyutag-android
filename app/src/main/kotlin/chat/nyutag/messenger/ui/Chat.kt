@@ -87,6 +87,8 @@ private sealed class Action {
     object Copy : Action()
     object Edit : Action()
     object Delete : Action()
+    object Forward : Action()
+    object Report : Action()
     data class React(val key: String) : Action()
 }
 
@@ -116,6 +118,9 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var editing by remember(roomID) { mutableStateOf<FeedItem?>(null) }
     var deleting by remember(roomID) { mutableStateOf<FeedItem?>(null) }
     var failed by remember(roomID) { mutableStateOf(false) }
+    var forwarding by remember(roomID) { mutableStateOf<FeedItem?>(null) }
+    var reporting by remember(roomID) { mutableStateOf<FeedItem?>(null) }
+    var reportSent by remember(roomID) { mutableStateOf(false) }
     val context = LocalContext.current
     val listState = rememberLazyListState()
 
@@ -192,10 +197,20 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             Action.Copy -> (item.body as? FeedItem.Body.Text)?.let { copyText(context, it.text) }
             Action.Edit -> (item.body as? FeedItem.Body.Text)?.let { replyTo = null; editing = item; draft = TextFieldValue(it.text, TextRange(it.text.length)) }
             Action.Delete -> deleting = item
+            Action.Forward -> forwarding = item
+            Action.Report -> reporting = item
             is Action.React -> run("реакция ${action.key}") { session.toggleReaction(roomID, item, action.key) }
         }
     }
 
+    forwarding?.let { item ->
+        ForwardScreen(session, item, roomID) { forwarding = null }
+        return
+    }
+    reporting?.let { item ->
+        ReportScreen(session, item, roomID, onClose = { reporting = null }) { reporting = null; reportSent = true }
+        return
+    }
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding().imePadding()) {
         Header(line, typingLine, onBack)
         val rows = remember(items, outbox.toList(), words.lang) { layout(items, outbox.toList(), line, words) }
@@ -263,6 +278,10 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                         }
                     },
                     dismissButton = { TextButton({ deleting = null }) { Text(words(P.cancel), color = palette.sky) } })
+    }
+    if (reportSent) {
+        AlertDialog(onDismissRequest = { reportSent = false }, title = { Text(words(P.reportSent)) },
+                    confirmButton = { TextButton({ reportSent = false }) { Text(words(P.done), color = palette.sky) } })
     }
     if (failed) {
         AlertDialog(onDismissRequest = { failed = false }, title = { Text(words(P.cantDo)) },
@@ -512,8 +531,10 @@ private fun MessageMenu(expanded: Boolean, item: FeedItem, onDismiss: () -> Unit
         }
         DropdownMenuItem({ Text(words(P.reply)) }, { onAction(Action.Reply) })
         if (item.body is FeedItem.Body.Text) DropdownMenuItem({ Text(words(P.copy)) }, { onAction(Action.Copy) })
+        if (item.canForward) DropdownMenuItem({ Text(words(P.forward)) }, { onAction(Action.Forward) })
         if (item.canEdit) DropdownMenuItem({ Text(words(P.editAction)) }, { onAction(Action.Edit) })
         if (item.canDelete) DropdownMenuItem({ Text(words(P.deleteAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Delete) })
+        if (item.canReport) DropdownMenuItem({ Text(words(P.reportAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Report) })
     }
 }
 

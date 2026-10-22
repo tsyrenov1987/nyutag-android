@@ -159,6 +159,13 @@ class MatrixClient(
         return perform(request)
     }
 
+    /** Запрос на WebSocket (релей звонков): тот же путь через дверь и те же заголовки, схема `https` остаётся —
+     *  сокет сам делает Upgrade поверх TLS. */
+    suspend fun webSocket(absolutePath: String, query: Map<String, String> = emptyMap()): HttpRequest {
+        val request = makeRequest(Method.GET, absolutePath, query, emptyMap(), true, null, HashMap(), null)
+        return HttpRequest(request.method, request.url, request.headers - "Accept", null, 15_000)
+    }
+
     // MARK: Внутреннее
 
     /** Основа адреса: дверь при дверях, иначе `homeserver`. Двери нет — ждём её, пока идёт гонка. */

@@ -20,6 +20,7 @@ import chat.nyutag.core.calls.CallPhase
 import chat.nyutag.core.calls.CallSession
 import chat.nyutag.core.calls.VideoSink
 import chat.nyutag.messenger.BuildConfig
+import chat.nyutag.messenger.ui.P
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -332,15 +333,16 @@ class CallService : android.app.Service() {
     override fun onBind(intent: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val words = chat.nyutag.messenger.ui.Words((application as chat.nyutag.messenger.NyutagApp).prefs)
         val manager = getSystemService(android.app.NotificationManager::class.java)
         manager.createNotificationChannel(
-            android.app.NotificationChannel(CHANNEL, "Звонки", android.app.NotificationManager.IMPORTANCE_LOW))
+            android.app.NotificationChannel(CHANNEL, words(P.call), android.app.NotificationManager.IMPORTANCE_LOW))
         val open = android.app.PendingIntent.getActivity(
             this, 0, packageManager.getLaunchIntentForPackage(packageName), android.app.PendingIntent.FLAG_IMMUTABLE)
         val notification = android.app.Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_phone_call)
             .setContentTitle(title.ifEmpty { "Нютаг" })
-            .setContentText("Нютаг")
+            .setContentText(words(P.callBack))
             .setContentIntent(open)
             .setOngoing(true)
             .build()

@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Нютаг</string>
+    <!-- Виджет в списке виджетов: этот список приложение не видит, поэтому язык по системе. -->
+    <string name="zurkhai_widget">Зурхай</string>
+    <string name="zurkhai_widget_about">Лунные сутки, стрижка и совет на сегодня.</string>
 </resources>

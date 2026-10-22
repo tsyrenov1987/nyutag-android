@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Цвета виджета «Зурхай» — те же, что в палитре приложения (ui/Theme.kt). -->
+<resources>
+    <color name="widget_card">#FFFFFF</color>
+    <color name="widget_ink">#18202E</color>
+    <color name="widget_quiet">#6B7280</color>
+    <color name="widget_sky">#2347A6</color>
+    <color name="widget_gold">#C9971C</color>
+    <color name="widget_good">#1F8A5B</color>
+</resources>

@@ -2,6 +2,7 @@
 
 package chat.nyutag.messenger
 
+import chat.nyutag.messenger.widget.ZurkhaiWidget
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -52,6 +53,7 @@ class MainActivity : ComponentActivity() {
     private val app get() = application as NyutagApp
     /** Чат из нажатого уведомления: откроется, как только вход поднимется. */
     private val pushedRoom = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private val calendarAsked = kotlinx.coroutines.flow.MutableStateFlow(false)
     /** Чат на экране; сессии он нужен, только пока окно видно. */
     private var shownRoom: String? = null
     private var visible = false
@@ -64,6 +66,7 @@ class MainActivity : ComponentActivity() {
         session.launch()
         val wallpapers = Wallpapers(applicationContext)
         pushedRoom.value = intent?.getStringExtra(OPEN_ROOM)
+        calendarAsked.value = intent?.getBooleanExtra(OPEN_CALENDAR, false) == true
         setContent {
             NyutagTheme {
                 CompositionLocalProvider(LocalWords provides words, LocalAvatars provides session,
@@ -85,6 +88,17 @@ class MainActivity : ComponentActivity() {
                         openRoom = room
                         pushedRoom.value = null
                     }
+                    // Виджет «Зурхай»: нажатие открывает вкладку «Календарь».
+                    val calendar by calendarAsked.collectAsState()
+                    LaunchedEffect(calendar, phase) {
+                        if (!calendar || phase != AppSession.Phase.SIGNED_IN) return@LaunchedEffect
+                        openRoom = null
+                        community = null
+                        tab = 3
+                        calendarAsked.value = false
+                    }
+                    // Виджет пишет на языке приложения: сменили язык — перерисовать, заодно и новый день при запуске.
+                    LaunchedEffect(words.lang, words.buryatLetters) { ZurkhaiWidget.refresh(applicationContext) }
                     LaunchedEffect(openRoom) {
                         shownRoom = openRoom
                         if (visible) session.visibleRoom = openRoom
@@ -139,6 +153,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.getStringExtra(OPEN_ROOM)?.let { pushedRoom.value = it }
+        if (intent.getBooleanExtra(OPEN_CALENDAR, false)) calendarAsked.value = true
     }
 
     override fun onStart() {
@@ -156,5 +171,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val OPEN_ROOM = "chat.nyutag.messenger.OPEN_ROOM"
+        const val OPEN_CALENDAR = "chat.nyutag.messenger.OPEN_CALENDAR"
     }
 }

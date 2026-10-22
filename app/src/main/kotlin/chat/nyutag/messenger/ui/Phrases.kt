@@ -311,7 +311,7 @@ object P {
     val communitiesSearch = Phrase(bxr = "Оршон бэдэрхэ", ru = "Поиск сообществ", en = "Search communities")
     val communitiesMine = Phrase(bxr = "Минии оршонууд", ru = "Мои сообщества", en = "My communities")
     val communitiesAll = Phrase(bxr = "Бүхы оршонууд", ru = "Все сообщества", en = "All communities")
-    val communitiesNotFound = Phrase(bxr = "Юуншье олдоогүй", ru = "Ничего не нашли", en = "Nothing found")
+    val communitiesNotFound = Phrase(bxr = "Юумэ олдобогүй", ru = "Ничего не нашлось", en = "Nothing found")
     val communitiesEmpty = Phrase(bxr = "Оршон үшөө үгы. Түрүүшынхиеэ байгуулагты!", ru = "Сообществ пока нет. Создайте первое!", en = "No communities yet. Create the first one!")
     val communitiesFailed = Phrase(bxr = "Оршонууд ачаалагдабагүй. Доошоо татажа дахин оролдогты.", ru = "Сообщества не загрузились. Потяните вниз, чтобы повторить.", en = "Couldn't load communities. Pull down to try again.")
     val communityOpen = Phrase(bxr = "Нээлттэй", ru = "Открытое", en = "Open")

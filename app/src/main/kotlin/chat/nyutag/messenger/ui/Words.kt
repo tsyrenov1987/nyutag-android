@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import chat.nyutag.core.net.KeyValueStore
+import chat.nyutag.core.rooms.EastYear
 import java.util.Locale
 
 enum class Lang(val ownName: String) {
@@ -43,8 +44,34 @@ class Words(private val prefs: KeyValueStore) {
 
     val locale: Locale get() = (lang ?: Lang.ru).locale
 
+    /** «Огненная Лошадь» / «Улаан морин» / «Fire Horse»: по-русски стихия согласуется с родом животного. */
+    fun eastYear(year: EastYear): String {
+        val feminine = year.animal in listOf(0, 5, 6, 7, 8, 10, 11)
+        val element = if (feminine) elementsFeminine[year.element] else elements[year.element]
+        return "${this(element)} ${this(animals[year.animal])}"
+    }
+
     companion object {
         const val KEY = "nyutag.lang"
+
+        private val elements = listOf(
+            Phrase(bxr = "Хүхэ", ru = "Деревянный", en = "Wood"), Phrase(bxr = "Улаан", ru = "Огненный", en = "Fire"),
+            Phrase(bxr = "Шара", ru = "Земляной", en = "Earth"), Phrase(bxr = "Сагаан", ru = "Металлический", en = "Metal"),
+            Phrase(bxr = "Хара", ru = "Водяной", en = "Water"),
+        )
+        private val elementsFeminine = listOf(
+            Phrase(bxr = "Хүхэ", ru = "Деревянная", en = "Wood"), Phrase(bxr = "Улаан", ru = "Огненная", en = "Fire"),
+            Phrase(bxr = "Шара", ru = "Земляная", en = "Earth"), Phrase(bxr = "Сагаан", ru = "Металлическая", en = "Metal"),
+            Phrase(bxr = "Хара", ru = "Водяная", en = "Water"),
+        )
+        private val animals = listOf(
+            Phrase(bxr = "хулгана", ru = "Крыса", en = "Rat"), Phrase(bxr = "үхэр", ru = "Бык", en = "Ox"),
+            Phrase(bxr = "бар", ru = "Тигр", en = "Tiger"), Phrase(bxr = "туулай", ru = "Кролик", en = "Rabbit"),
+            Phrase(bxr = "луу", ru = "Дракон", en = "Dragon"), Phrase(bxr = "могой", ru = "Змея", en = "Snake"),
+            Phrase(bxr = "морин", ru = "Лошадь", en = "Horse"), Phrase(bxr = "хонин", ru = "Овца", en = "Sheep"),
+            Phrase(bxr = "бишэн", ru = "Обезьяна", en = "Monkey"), Phrase(bxr = "тахяа", ru = "Петух", en = "Rooster"),
+            Phrase(bxr = "нохой", ru = "Собака", en = "Dog"), Phrase(bxr = "гахай", ru = "Свинья", en = "Pig"),
+        )
     }
 }
 

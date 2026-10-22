@@ -1,4 +1,4 @@
-// Нютаг. Главный экран: вкладки внизу (выбранная живёт в окне, чтобы вернуться на неё из чата), как на iOS (Чаты | Контакты | Сообщества; календарь — следующим срезом).
+// Нютаг. Главный экран: вкладки внизу (выбранная живёт в окне, чтобы вернуться на неё из чата), как на iOS (Чаты | Контакты | Сообщества | Календарь).
 // Открытое сообщество тоже живёт в окне: из чата его группы возвращаемся в карточку.
 // Значки рисуем сами: набора иконок в зависимостях нет.
 
@@ -60,7 +60,8 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
             when (tab) {
                 0 -> ChatListScreen(session, onOpen, onInvite = { inviting = true })
                 1 -> ContactsScreen(session, onOpen, onInvite = { inviting = true })
-                else -> CommunitiesScreen(session, onCommunity = { onCommunity(it) }, onNew = { founding = true })
+                2 -> CommunitiesScreen(session, onCommunity = { onCommunity(it) }, onNew = { founding = true })
+                else -> CalendarScreen()
             }
         }
         HorizontalDivider(color = palette.plate)
@@ -68,6 +69,7 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
             TabItem(words(P.chats), tab == 0, Modifier.weight(1f), ::bubbles) { onTab(0) }
             TabItem(words(P.contacts), tab == 1, Modifier.weight(1f), ::people) { onTab(1) }
             TabItem(words(P.communities), tab == 2, Modifier.weight(1f), ::hexagons) { onTab(2) }
+            TabItem(words(P.calendar), tab == 3, Modifier.weight(1f), ::moonStars) { onTab(3) }
         }
     }
 }
@@ -120,4 +122,16 @@ private fun hexagons(scope: DrawScope, color: Color) = with(scope) {
         path.close()
         drawPath(path, color, style = stroke)
     }
+}
+
+/** Полумесяц и две звезды, как moon.stars на iOS. */
+private fun moonStars(scope: DrawScope, color: Color) = with(scope) {
+    val h = size.height
+    val c = Offset(size.width * 0.40f, h * 0.55f)
+    val r = h * 0.38f
+    val moon = androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(c, r)) }
+    val bite = androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(Offset(c.x + r * 0.55f, c.y - r * 0.40f), r * 0.85f)) }
+    drawPath(androidx.compose.ui.graphics.Path.combine(androidx.compose.ui.graphics.PathOperation.Difference, moon, bite), color)
+    drawCircle(color, h * 0.08f, Offset(size.width * 0.80f, h * 0.18f))
+    drawCircle(color, h * 0.05f, Offset(size.width * 0.92f, h * 0.48f))
 }

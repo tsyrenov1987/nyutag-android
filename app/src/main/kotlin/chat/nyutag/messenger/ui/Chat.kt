@@ -69,6 +69,8 @@ import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
 import chat.nyutag.core.rooms.TransactionID
 import chat.nyutag.messenger.BuildConfig
+import android.widget.Toast
+import androidx.compose.runtime.produceState
 import chat.nyutag.messenger.session.AppSession
 import java.time.Instant
 import java.time.LocalDate
@@ -124,6 +126,9 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var choosingWallpaper by remember(roomID) { mutableStateOf(false) }
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    val mic = rememberMicAccess()
+    // Звонить можно один на один и в шифрованную группу; состав комнаты меняется синхронизацией.
+    val callKind by produceState(AppSession.CallKind.NONE, roomID, revision) { value = session.callKind(roomID) }
 
     LaunchedEffect(roomID, revision, limit) {
         val fresh = session.feed(roomID, limit)
@@ -217,7 +222,13 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
         return
     }
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding().imePadding()) {
-        Header(line, typingLine, onBack, onWallpaper = { choosingWallpaper = true })
+        Header(line, typingLine, onBack, onWallpaper = { choosingWallpaper = true },
+               onCall = if (callKind == AppSession.CallKind.NONE) null else ({
+                   mic.ask { granted ->
+                       if (granted) scope.launch { session.startCall(roomID) }
+                       else Toast.makeText(context, words(P.callMicDenied), Toast.LENGTH_LONG).show()
+                   }
+               }))
         val rows = remember(items, outbox.toList(), words.lang) { layout(items, outbox.toList(), line, words) }
         // Новая реплика внизу: своя — всегда к ней, чужая — если читатель и так внизу (не листает историю).
         val newest = rows.lastOrNull()
@@ -298,7 +309,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit) {
+private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit, onCall: (() -> Unit)?) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
@@ -316,6 +327,7 @@ private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallp
             }
             if (typing != null) Text(typing, color = palette.sky, fontSize = 13.sp, maxLines = 1)
         }
+        if (onCall != null) CallButton(palette.sky, onClick = onCall)
         Box {
             Text("⋯", color = palette.sky, fontSize = 26.sp,
                  modifier = Modifier.clip(CircleShape).clickable { menu = true }.padding(horizontal = 12.dp, vertical = 2.dp))

@@ -11,6 +11,11 @@ import android.util.Log
 import chat.nyutag.core.auth.AccountKeeper
 import chat.nyutag.core.auth.Shelf
 import chat.nyutag.core.auth.SignedInAccount
+import chat.nyutag.core.calls.CallCenter
+import chat.nyutag.core.calls.CallEnvironment
+import chat.nyutag.core.calls.CallMessage
+import chat.nyutag.core.calls.CallSignal
+import chat.nyutag.core.calls.RelayLink
 import chat.nyutag.core.crypto.CryptoMachine
 import chat.nyutag.core.crypto.E2EEException
 import chat.nyutag.core.crypto.PasswordUnlockOutcome
@@ -81,6 +86,8 @@ import chat.nyutag.core.sync.SyncEngine
 import chat.nyutag.core.sync.SyncResponse
 import chat.nyutag.json.JsonValue
 import chat.nyutag.messenger.BuildConfig
+import chat.nyutag.messenger.calls.CallDesk
+import chat.nyutag.messenger.calls.OpusCodecs
 import chat.nyutag.messenger.data.AndroidSql
 import chat.nyutag.messenger.data.KeystoreVault
 import chat.nyutag.messenger.data.Pictures
@@ -120,6 +127,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
         doors.makeClient(homeserver, token)
     }
 
+    /** Звонки аккаунта: экран звонка читает стойку. */
+    val calls = CallDesk(context.applicationContext)
     private val phaseFlow = MutableStateFlow(Phase.LAUNCHING)
     val phase: StateFlow<Phase> get() = phaseFlow
     private val linesFlow = MutableStateFlow<List<ChatLine>>(emptyList())
@@ -165,6 +174,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private var pump: Job? = null
     private val opened = ConcurrentHashMap<String, Event>()
     private val autoJoined = HashSet<String>()
+    /** Свежие шифрованные события, ключ к которым ещё не пришёл: могут оказаться сигналами звонка. */
+    private var lockedSignals: List<Pair<Event, String>> = emptyList()
     private val refreshing = Mutex()
     /** Сверка книжки с сервером не чаще раза в десять минут: у сервера суточный предел. */
     private var matchedAt = 0L
@@ -309,8 +320,10 @@ class AppSession(context: Context, private val doors: DoorHub) {
             log("машина шифрования не поднялась: $e")
         }
         log("это устройство ${account.session.deviceID}")
+        startCalls(account)
         pump = scope.launch {
             engine.updates.collect { update ->
+                absorbCalls(update.response)
                 noteTyping(update.response)
                 refresh()
                 revisionFlow.value += 1
@@ -323,6 +336,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private fun stop() {
         pump?.cancel()
         pump = null
+        lockedSignals = emptyList()
+        val calls = calls
+        scope.launch { calls.detach() }
         engine?.stop()
         engine = null
         machine = null
@@ -547,6 +563,94 @@ class AppSession(context: Context, private val doors: DoorHub) {
             runCatching { account.store.state(roomID, EventType.MEMBER, userID)?.get("displayname")?.string }
                 .getOrNull()?.takeIf { it.isNotEmpty() }
         } ?: ChatDigest.localpart(userID)
+    }
+
+    // MARK: Звонки
+
+    enum class CallKind { NONE, DIRECT, GROUP }
+
+    /** Позвонить в комнату: один на один, если в ней ровно один кроме нас, иначе групповой (только голос). */
+    suspend fun startCall(roomID: String) {
+        when (callKind(roomID)) {
+            CallKind.DIRECT -> callPeer(roomID)?.let { calls.dial(roomID, it) }
+            CallKind.GROUP -> calls.dialGroup(roomID)
+            CallKind.NONE -> {}
+        }
+    }
+
+    /** Групповой — только в шифрованной комнате: ключи кадров идут шифром комнаты. */
+    suspend fun callKind(roomID: String): CallKind {
+        val others = callMembers(roomID)
+        if (others.size == 1) return CallKind.DIRECT
+        val account = account ?: return CallKind.NONE
+        val encrypted = withContext(Dispatchers.IO) { runCatching { account.store.room(roomID)?.isEncrypted }.getOrNull() } ?: false
+        return if (others.size > 1 && encrypted) CallKind.GROUP else CallKind.NONE
+    }
+
+    private suspend fun callPeer(roomID: String): String? = callMembers(roomID).singleOrNull()
+
+    private suspend fun callMembers(roomID: String): List<String> {
+        val account = account ?: return emptyList()
+        val me = me ?: return emptyList()
+        return withContext(Dispatchers.IO) {
+            runCatching { account.store.stateAll(roomID, EventType.MEMBER) }.getOrDefault(emptyList())
+                .filter { it.stateKey != me && (it.content["membership"]?.string ?: "") in setOf("join", "invite") }
+                .map { it.stateKey }
+        }
+    }
+
+    private fun startCalls(account: SignedInAccount) {
+        val client = account.client
+        val env = CallEnvironment(
+            me = account.session.userID, deviceID = account.session.deviceID,
+            post = { signal, roomID -> if (!postSignal(signal, roomID)) throw IllegalStateException("сигнал не ушёл") },
+            openTransport = { slot -> RelayLink.open(client, slot) },
+            makeVoice = { calls.makeVoice() },
+            codecs = OpusCodecs,
+        )
+        calls.name = { roomID, peer -> title(roomID).ifEmpty { ChatDigest.localpart(peer) } }
+        calls.memberName = { roomID, user -> displayName(roomID, user) }
+        calls.attach(CallCenter(env))
+    }
+
+    /** Будильник идёт открытым всегда (по нему шлюз будит телефон пушем), остальное — как обычные события комнаты. */
+    private suspend fun postSignal(signal: CallSignal, roomID: String): Boolean {
+        val account = account ?: return false
+        val sent = if (!signal.wantsRoomEncryption) {
+            runCatching { account.client.send(roomID, signal.eventType, signal.content, TransactionID.make()) }.isSuccess
+        } else {
+            post(signal.eventType, signal.content, roomID, TransactionID.make()) != null
+        }
+        log("сигнал ${signal.eventType} ${if (sent) "ушёл" else "не ушёл"}")
+        return sent
+    }
+
+    /** Сигналы звонков из свежей синхронизации. Старше двух минут не смотрим: звонок уже кончился, а расшифровка
+     *  всей истории первой синхронизации стоила бы дорого. Ключ сеанса нового устройства собеседника часто
+     *  приходит синхронизацией позже самого сигнала: нераскрытые свежие события пробуем снова при следующих. */
+    private suspend fun absorbCalls(response: SyncResponse) {
+        val fresh = System.currentTimeMillis() - 120_000
+        val waiting = lockedSignals.filter { (it.first.originServerTS ?: 0) > fresh }
+        val locked = ArrayList<Pair<Event, String>>()
+        val arrived = ArrayList(waiting)
+        for ((roomID, room) in response.joined) {
+            for (event in room.timeline.events) if ((event.originServerTS ?: 0) > fresh) arrived += event to roomID
+        }
+        for ((event, roomID) in arrived) {
+            var clear = event
+            if (event.type == EventType.ENCRYPTED) {
+                val opened = open(event, roomID)
+                if (opened == null) {
+                    if (locked.size < 64) locked += event to roomID
+                    continue
+                }
+                clear = opened
+            }
+            val message = CallMessage.of(clear, roomID) ?: continue
+            log("пришёл сигнал ${clear.type} из ${roomID.take(8)}…")
+            calls.absorb(message)
+        }
+        lockedSignals = locked
     }
 
     // MARK: Контакты

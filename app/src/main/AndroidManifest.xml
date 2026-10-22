@@ -4,6 +4,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Вкладка «Контакты»: кто из книжки уже в Нютаге. Номера уходят на сервер только для сверки, книжка не хранится. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Звонки: микрофон, переключение динамика, вибрация входящего и служба, чтобы разговор шёл с выключенным экраном. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <application
         android:name=".NyutagApp"
         android:label="@string/app_name"
@@ -19,5 +25,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".calls.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 </manifest>

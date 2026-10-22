@@ -8,6 +8,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.CompositionLocalProvider
@@ -21,6 +25,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import chat.nyutag.messenger.session.AppSession
+import chat.nyutag.messenger.ui.CallScreen
+import chat.nyutag.messenger.ui.CallStrip
 import chat.nyutag.messenger.ui.ChatScreen
 import chat.nyutag.messenger.ui.HomeScreen
 import chat.nyutag.messenger.ui.LanguageScreen
@@ -59,6 +65,13 @@ class MainActivity : ComponentActivity() {
                         if (phase == AppSession.Phase.SIGNED_IN) entry = Entry.SIGN_IN
                         if (phase == AppSession.Phase.SIGNED_OUT) { tab = 0; community = null }
                     }
+                    val call by session.calls.current.collectAsState()
+                    val folded by session.calls.folded.collectAsState()
+                    val inCall = call != null && phase == AppSession.Phase.SIGNED_IN
+                    Column(Modifier.fillMaxSize()) {
+                    // Свёрнутый звонок: полоска сверху забирает отступ строки состояния у экранов под ней.
+                    if (inCall && folded) CallStrip(session.calls)
+                    Box(Modifier.weight(1f).then(if (inCall && folded) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)) {
                     when {
                         words.lang == null -> LanguageScreen(words)
                         phase == AppSession.Phase.LAUNCHING ->
@@ -73,6 +86,9 @@ class MainActivity : ComponentActivity() {
                         openRoom != null -> ChatScreen(session, openRoom!!) { openRoom = null }
                         else -> HomeScreen(session, tab, { tab = it }, community, { community = it }) { openRoom = it }
                     }
+                    }
+                    }
+                    if (inCall && !folded) CallScreen(session.calls)
                 }
             }
         }

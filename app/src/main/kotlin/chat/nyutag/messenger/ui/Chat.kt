@@ -49,6 +49,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import chat.nyutag.core.nyutag.BuryatLetters
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -102,7 +106,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var limit by remember(roomID) { mutableStateOf(60) }
     var items by remember(roomID) { mutableStateOf<List<FeedItem>>(emptyList()) }
     val outbox = remember(roomID) { mutableStateListOf<Outgoing>() }
-    var draft by remember(roomID) { mutableStateOf("") }
+    var draft by remember(roomID) { mutableStateOf(TextFieldValue()) }
     var loadingOlder by remember(roomID) { mutableStateOf(false) }
     var noMoreHistory by remember(roomID) { mutableStateOf(false) }
     var lastRead by remember(roomID) { mutableStateOf<String?>(null) }
@@ -186,7 +190,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
         when (action) {
             Action.Reply -> { editing = null; replyTo = item }
             Action.Copy -> (item.body as? FeedItem.Body.Text)?.let { copyText(context, it.text) }
-            Action.Edit -> (item.body as? FeedItem.Body.Text)?.let { replyTo = null; editing = item; draft = it.text }
+            Action.Edit -> (item.body as? FeedItem.Body.Text)?.let { replyTo = null; editing = item; draft = TextFieldValue(it.text, TextRange(it.text.length)) }
             Action.Delete -> deleting = item
             is Action.React -> run("реакция ${action.key}") { session.toggleReaction(roomID, item, action.key) }
         }
@@ -213,22 +217,30 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             }
         }
         editing?.let { item ->
-            ComposerBanner("✎ " + words(P.editing), summary(item, words)) { editing = null; draft = "" }
+            ComposerBanner("✎ " + words(P.editing), summary(item, words)) { editing = null; draft = TextFieldValue() }
         } ?: replyTo?.let { item ->
             ComposerBanner(item.senderName, summary(item, words)) { replyTo = null }
         }
         val old = (editing?.body as? FeedItem.Body.Text)?.text
-        Composer(draft, editing = editing != null, ready = draft.isNotBlank() && draft.trim() != old, onChange = { text ->
-            draft = text
+        Composer(draft, editing = editing != null, ready = draft.text.isNotBlank() && draft.text.trim() != old, onChange = { value ->
+            // «hайн» → «һайн» при наборе; длина не меняется, курсор остаётся на месте. Пока клавиатура составляет слово,
+            // текст не трогаем: подмена посреди составления сбивает Gboard, и он вставляет слово заново.
+            draft = (if (words.buryatLetters && value.composition == null) BuryatLetters.fix(value.text) else null)
+                ?.let { value.copy(text = it) } ?: value
+            val text = draft.text
             val now = System.currentTimeMillis()
             if (editing == null && text.isNotBlank() && now - typingSentAt > 8_000) {
                 typingSentAt = now
                 scope.launch { session.setTyping(roomID, true) }
             }
+        }, onLetter = { base ->
+            val start = draft.selection.min
+            val letter = BuryatLetters.letter(base, draft.text.substring(0, start))
+            draft = TextFieldValue(draft.text.replaceRange(start, draft.selection.max, letter.toString()), TextRange(start + 1))
         }, onSend = {
-            val text = draft.trim()
+            val text = draft.text.let { if (words.buryatLetters) BuryatLetters.fix(it) ?: it else it }.trim()
             if (text.isEmpty()) return@Composer
-            draft = ""
+            draft = TextFieldValue()
             val target = editing
             if (target != null) {
                 editing = null
@@ -448,14 +460,28 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit, onAction: (Action) -> U
 }
 
 @Composable
-private fun Composer(text: String, editing: Boolean, ready: Boolean, onChange: (String) -> Unit, onSend: () -> Unit) {
+private fun Composer(text: TextFieldValue, editing: Boolean, ready: Boolean, onChange: (TextFieldValue) -> Unit,
+                     onLetter: (Char) -> Unit, onSend: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
+    var typing by remember { mutableStateOf(false) }
+    // Строка «ө ү һ»: на русской раскладке этих букв нет. Кнопки не забирают фокус, клавиатура остаётся.
+    if (typing && words.buryatLetters) {
+        Row(Modifier.fillMaxWidth().background(palette.card).padding(start = 10.dp, end = 10.dp, top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (letter in BuryatLetters.row) {
+                Box(Modifier.size(52.dp, 34.dp).clip(RoundedCornerShape(10.dp)).background(palette.milk).clickable { onLetter(letter) },
+                    contentAlignment = Alignment.Center) {
+                    Text(letter.toString(), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
     Row(Modifier.fillMaxWidth().background(palette.card).padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(Modifier.weight(1f).clip(RoundedCornerShape(20.dp)).background(palette.milk).padding(horizontal = 14.dp, vertical = 10.dp)) {
-            if (text.isEmpty()) Text(words(P.messageField), color = palette.quiet, fontSize = 16.sp)
-            BasicTextField(text, onChange, Modifier.fillMaxWidth(), maxLines = 6,
+            if (text.text.isEmpty()) Text(words(P.messageField), color = palette.quiet, fontSize = 16.sp)
+            BasicTextField(text, onChange, Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }, maxLines = 6,
                            textStyle = TextStyle(color = palette.ink, fontSize = 16.sp), cursorBrush = SolidColor(palette.sky),
                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences))
         }

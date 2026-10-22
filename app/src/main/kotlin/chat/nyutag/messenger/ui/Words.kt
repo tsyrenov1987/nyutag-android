@@ -44,6 +44,15 @@ class Words(private val prefs: KeyValueStore) {
 
     val locale: Locale get() = (lang ?: Lang.ru).locale
 
+    /** Кнопки «ө ү һ» над полем ввода и замена h, y, θ внутри кириллического слова; по умолчанию включено. */
+    var buryatLetters: Boolean by mutableStateOf(prefs.get(LETTERS_KEY) != "false")
+        private set
+
+    fun chooseLetters(on: Boolean) {
+        buryatLetters = on
+        prefs.put(LETTERS_KEY, on.toString())
+    }
+
     /** «Огненная Лошадь» / «Улаан морин» / «Fire Horse»: по-русски стихия согласуется с родом животного. */
     fun eastYear(year: EastYear): String {
         val feminine = year.animal in listOf(0, 5, 6, 7, 8, 10, 11)
@@ -53,6 +62,7 @@ class Words(private val prefs: KeyValueStore) {
 
     companion object {
         const val KEY = "nyutag.lang"
+        const val LETTERS_KEY = "nyutag.buryatLetters"
 
         private val elements = listOf(
             Phrase(bxr = "Хүхэ", ru = "Деревянный", en = "Wood"), Phrase(bxr = "Улаан", ru = "Огненный", en = "Fire"),

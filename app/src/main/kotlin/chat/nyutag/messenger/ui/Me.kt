@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -79,7 +81,7 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
             FormDivider()
             MenuRow(words(P.inviteFriend), palette.sky) { onInvite() }
         }
-        Section(words(P.language)) {
+        Section(words(P.language), footer = words(P.buryatLettersHint)) {
             FormCard {
                 Lang.entries.forEachIndexed { index, lang ->
                     if (index > 0) FormDivider()
@@ -87,6 +89,13 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
                         Text(lang.ownName, color = palette.ink, fontSize = 17.sp, modifier = Modifier.weight(1f))
                         if (words.lang == lang) Text("✓", color = palette.sky, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     }
+                }
+                FormDivider()
+                Row(Modifier.fillMaxWidth().clickable { words.chooseLetters(!words.buryatLetters) }.padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(words(P.buryatLetters), color = palette.ink, fontSize = 17.sp, modifier = Modifier.weight(1f))
+                    Switch(words.buryatLetters, words::chooseLetters,
+                           colors = SwitchDefaults.colors(checkedTrackColor = palette.gold, checkedThumbColor = Color.White))
                 }
             }
         }

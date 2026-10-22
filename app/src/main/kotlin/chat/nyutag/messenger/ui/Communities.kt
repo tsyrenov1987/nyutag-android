@@ -65,14 +65,15 @@ data class Community(
     val topic: String? = null,
     val members: Int? = null,
     val joinRule: String? = null,
+    val avatar: String? = null,
 ) {
     val isClosed: Boolean get() = joinRule == "knock"
 
     companion object {
         fun of(room: PublicRoom) = Community(room.roomID, room.name ?: room.canonicalAlias.orEmpty(), room.topic,
-                                             room.numJoinedMembers, room.joinRule)
+                                             room.numJoinedMembers, room.joinRule, room.avatarURL?.toString())
 
-        fun of(line: ChatLine) = Community(line.id, line.title)
+        fun of(line: ChatLine) = Community(line.id, line.title, avatar = line.avatarURL)
 
         /** По id: сначала каталог (там описание и правило входа), потом свои. */
         fun find(id: String, session: AppSession): Community? =
@@ -161,7 +162,7 @@ private fun CommunityRow(community: Community, onClick: () -> Unit) {
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card).clickable(onClick = onClick).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Pillow(community.id, community.name.ifEmpty { "·" }, size = 44.dp)
+        Pillow(community.id, community.name.ifEmpty { "·" }, size = 44.dp, avatar = community.avatar)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(community.name.ifEmpty { words(P.communities) }, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Medium,
                  maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -211,7 +212,7 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
 
     FormPage(community.name, onClose) {
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Pillow(community.id, community.name.ifEmpty { "·" }, size = 76.dp)
+            Pillow(community.id, community.name.ifEmpty { "·" }, size = 76.dp, avatar = community.avatar)
             Text(community.name, color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
             community.topic?.takeIf { it.isNotEmpty() }?.let {
                 Text(it, color = palette.quiet, fontSize = 15.sp, textAlign = TextAlign.Center)

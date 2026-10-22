@@ -121,6 +121,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var forwarding by remember(roomID) { mutableStateOf<FeedItem?>(null) }
     var reporting by remember(roomID) { mutableStateOf<FeedItem?>(null) }
     var reportSent by remember(roomID) { mutableStateOf(false) }
+    var choosingWallpaper by remember(roomID) { mutableStateOf(false) }
     val context = LocalContext.current
     val listState = rememberLazyListState()
 
@@ -207,12 +208,16 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
         ForwardScreen(session, item, roomID) { forwarding = null }
         return
     }
+    if (choosingWallpaper) {
+        WallpaperPicker(roomID) { choosingWallpaper = false }
+        return
+    }
     reporting?.let { item ->
         ReportScreen(session, item, roomID, onClose = { reporting = null }) { reporting = null; reportSent = true }
         return
     }
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding().imePadding()) {
-        Header(line, typingLine, onBack)
+        Header(line, typingLine, onBack, onWallpaper = { choosingWallpaper = true })
         val rows = remember(items, outbox.toList(), words.lang) { layout(items, outbox.toList(), line, words) }
         // Новая реплика внизу: своя — всегда к ней, чужая — если читатель и так внизу (не листает историю).
         val newest = rows.lastOrNull()
@@ -220,7 +225,9 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             val mine = (newest as? Row.Bubble)?.mine == true
             if (newest != null && (mine || listState.firstVisibleItemIndex <= 2)) listState.animateScrollToItem(0)
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, reverseLayout = true,
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+        WallpaperBackground(roomID, Modifier.matchParentSize())
+        LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true,
                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
             items(rows.asReversed(), key = { it.key }) { row ->
                 when (row) {
@@ -230,6 +237,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                     }, onAction = { action -> row.item?.let { act(action, it) } })
                 }
             }
+        }
         }
         editing?.let { item ->
             ComposerBanner("✎ " + words(P.editing), summary(item, words)) { editing = null; draft = TextFieldValue() }
@@ -290,15 +298,16 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit) {
+private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
+    var menu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().background(palette.card).padding(horizontal = 4.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("‹", color = palette.sky, fontSize = 34.sp,
              modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(horizontal = 12.dp))
         val title = line?.title.orEmpty().ifEmpty { words(P.emptyChat) }
-        Pillow(line?.id.orEmpty(), title, 38.dp)
+        Pillow(line?.id.orEmpty(), title, 38.dp, line?.avatarURL)
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(title, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
@@ -306,6 +315,13 @@ private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit) {
                 if (line?.isEncrypted == true) LockMark(palette.quiet)
             }
             if (typing != null) Text(typing, color = palette.sky, fontSize = 13.sp, maxLines = 1)
+        }
+        Box {
+            Text("⋯", color = palette.sky, fontSize = 26.sp,
+                 modifier = Modifier.clip(CircleShape).clickable { menu = true }.padding(horizontal = 12.dp, vertical = 2.dp))
+            DropdownMenu(menu, { menu = false }) {
+                DropdownMenuItem({ Text(words(P.wallpaperForChat)) }, { menu = false; onWallpaper() })
+            }
         }
     }
 }

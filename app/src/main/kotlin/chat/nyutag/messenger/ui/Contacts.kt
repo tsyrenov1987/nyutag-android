@@ -261,7 +261,7 @@ fun PersonRow(person: Person, busy: Boolean = false, onClick: () -> Unit) {
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card).clickable(onClick = onClick).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Pillow(person.userID, person.name, size = 44.dp)
+        Pillow(person.userID, person.name, size = 44.dp, avatar = person.avatarURL)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(person.name, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("@" + ChatDigest.localpart(person.userID), color = palette.quiet, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

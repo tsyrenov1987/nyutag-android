@@ -4,9 +4,19 @@
 package chat.nyutag.messenger.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -22,6 +33,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +46,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -43,9 +63,12 @@ import chat.nyutag.core.rooms.People
 import chat.nyutag.core.rooms.Profile
 import chat.nyutag.core.rooms.ProfileAbout
 import chat.nyutag.messenger.BuildConfig
+import chat.nyutag.messenger.data.Pictures
 import chat.nyutag.messenger.session.AppSession
 import java.time.LocalDate
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal val Danger = Color(0xFFD03A2F)
 
@@ -60,14 +83,16 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
         "profile" -> { ProfileEditScreen(session) { page = "" }; return }
         "delete" -> { DeleteAccountScreen(session) { page = "" }; return }
         "devices" -> { DevicesScreen(session) { page = "" }; return }
+        "wallpaper" -> { WallpaperPicker(null) { page = "" }; return }
     }
     BackHandler(onBack = onClose)
     val me = session.me.orEmpty()
+    val myAvatar by session.myAvatar.collectAsState()
     FormPage("", onClose, closeTitle = words(P.done)) {
         FormCard {
             Row(Modifier.fillMaxWidth().clickable { page = "profile" }.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Pillow(me, ChatDigest.localpart(me), 64.dp)
+                Pillow(me, ChatDigest.localpart(me), 64.dp, myAvatar)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(ChatDigest.localpart(me), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     Text(me, color = palette.quiet, fontSize = 13.sp)
@@ -81,6 +106,8 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
             }
             FormDivider()
             MenuRow(words(P.inviteFriend), palette.sky) { onInvite() }
+            FormDivider()
+            MenuRow(words(P.wallpaper), palette.sky) { page = "wallpaper" }
         }
         Section(words(P.language), footer = words(P.buryatLettersHint)) {
             FormCard {
@@ -163,6 +190,29 @@ private fun ProfileEditScreen(session: AppSession, onClose: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
     var picking by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val myAvatar by session.myAvatar.collectAsState()
+    var photoBusy by remember { mutableStateOf(false) }
+    var photoFailed by remember { mutableStateOf(false) }
+    var viewing by remember { mutableStateOf(false) }
+
+    /** Снимок → квадрат 512 px → на сервер. `null` — убрать аватар. */
+    fun setAvatar(picked: ByteArray?) {
+        photoBusy = true
+        photoFailed = false
+        scope.launch {
+            val jpeg = picked?.let { withContext(Dispatchers.Default) { runCatching { Pictures.squareJPEG(it) }.getOrNull() } }
+            photoFailed = if (picked != null && jpeg == null) true else !session.setAvatar(jpeg)
+            photoBusy = false
+        }
+    }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val data = withContext(Dispatchers.IO) { runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
+            if (data == null) photoFailed = true else setAvatar(data)
+        }
+    }
 
     LaunchedEffect(Unit) {
         val me = session.me ?: return@LaunchedEffect
@@ -180,6 +230,9 @@ private fun ProfileEditScreen(session: AppSession, onClose: () -> Unit) {
         if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "профиль загружен: о себе ${if (ProfileAbout(profile).isEmpty) "пусто" else "есть"}, номер ${hasPhone ?: "?"}")
     }
 
+    if (viewing) {
+        myAvatar?.let { AvatarViewer(session, it, name) { viewing = false }; return }
+    }
     if (picking) {
         EastYearPicker(eastYear, { eastYear = it; picking = false }) { picking = false }
         return
@@ -208,6 +261,25 @@ private fun ProfileEditScreen(session: AppSession, onClose: () -> Unit) {
 
     val ready = old != null
     FormPage(words(P.profile), onClose, action = words(P.save), actionEnabled = ready && !busy, onAction = ::save) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.clip(RoundedCornerShape(33.dp)).clickable(enabled = myAvatar != null) { viewing = true },
+                contentAlignment = Alignment.Center) {
+                Pillow(session.me.orEmpty(), name.ifEmpty { ChatDigest.localpart(session.me.orEmpty()) }, 96.dp, myAvatar)
+                if (photoBusy) CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(words(P.avatarChange), color = palette.sky, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                     modifier = Modifier.clip(RoundedCornerShape(12.dp))
+                         .clickable(enabled = !photoBusy) { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                         .padding(horizontal = 12.dp, vertical = 8.dp))
+                if (myAvatar != null) {
+                    Text(words(P.avatarRemove), color = Danger, fontSize = 16.sp,
+                         modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = !photoBusy) { setAvatar(null) }
+                             .padding(horizontal = 12.dp, vertical = 8.dp))
+                }
+            }
+            if (photoFailed) FailureNote(words(P.avatarFailed))
+        }
         Section(words(P.name)) {
             FormCard { FormField(name, { name = it }, words(P.name)) }
         }
@@ -307,5 +379,33 @@ private fun DeleteAccountScreen(session: AppSession, onClose: () -> Unit) {
             Text(words(P.deleteAccount), color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.padding(4.dp))
+    }
+}
+
+/** Аватар во весь экран: щипок увеличивает до четырёх раз, касание сбрасывает или закрывает. */
+@Composable
+fun AvatarViewer(session: AppSession, url: String, title: String, onClose: () -> Unit) {
+    val words = LocalWords.current
+    BackHandler(onBack = onClose)
+    var zoom by remember { mutableFloatStateOf(1f) }
+    val image by produceState<android.graphics.Bitmap?>(null, url) {
+        value = session.avatarFull(url)
+        if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "аватар во весь экран ${value?.let { "${it.width}x${it.height}" } ?: "не загружен"}")
+    }
+    Box(Modifier.fillMaxSize().background(Color.Black)
+            .pointerInput(Unit) { detectTapGestures { if (zoom == 1f) onClose() else zoom = 1f } }
+            .pointerInput(Unit) { detectTransformGestures { _, _, scale, _ -> zoom = (zoom * scale).coerceIn(1f, 4f) } },
+        contentAlignment = Alignment.Center) {
+        image?.let {
+            Image(it.asImageBitmap(), contentDescription = title, contentScale = ContentScale.Fit,
+                  modifier = Modifier.fillMaxSize().graphicsLayer(scaleX = zoom, scaleY = zoom))
+        } ?: CircularProgressIndicator(color = Color.White)
+        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().safeDrawingPadding().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                 overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(words(P.done), color = Color.White, fontSize = 17.sp,
+                 modifier = Modifier.clickable(onClick = onClose).padding(8.dp))
+        }
     }
 }

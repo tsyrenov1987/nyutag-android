@@ -19,6 +19,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,7 +31,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -36,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.messenger.R
+import chat.nyutag.messenger.session.AppSession
 
 /** Знак Нютага, как на иконке: юрта-реплика с соёмбо на синем значка. */
 @Composable
@@ -48,15 +55,28 @@ fun NyutagLogo(size: Dp = 96.dp) {
     }
 }
 
-/** Аватар без картинки: первая буква на цвете из пятёрки; цвет постоянный по идентификатору. */
+/** Откуда «подушки» берут фото: сессия с кэшем аватаров. Без неё (превью, вход) — только буквы. */
+val LocalAvatars = staticCompositionLocalOf<AppSession?> { null }
+
+/** Аватар: фото, если есть (`mxc://…`), иначе первая буква на цвете из пятёрки; цвет постоянный по идентификатору. */
 @Composable
-fun Pillow(seed: String, title: String, size: Dp = 52.dp) {
+fun Pillow(seed: String, title: String, size: Dp = 52.dp, avatar: String? = null) {
     val tints = LocalPalette.current.avatarTints
     val tint = tints[(stableHash(seed) % tints.size.toUInt()).toInt()]
+    val session = LocalAvatars.current
+    val pixels = with(LocalDensity.current) { size.roundToPx() }
+    val picture by produceState(avatar?.let { session?.cachedAvatar(it, pixels) }, avatar, pixels) {
+        value = avatar?.let { session?.avatar(it, pixels) }
+    }
     Box(Modifier.size(size).clip(RoundedCornerShape(size * 0.34f))
             .background(Brush.verticalGradient(listOf(tint.copy(alpha = 0.85f), tint))),
         contentAlignment = Alignment.Center) {
-        Text(initial(title), color = Color.White, fontSize = (size.value * 0.42f).sp, fontWeight = FontWeight.SemiBold)
+        val image = picture
+        if (image != null) {
+            Image(image.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else {
+            Text(initial(title), color = Color.White, fontSize = (size.value * 0.42f).sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 

@@ -24,6 +24,9 @@ import chat.nyutag.messenger.session.AppSession
 import chat.nyutag.messenger.ui.ChatScreen
 import chat.nyutag.messenger.ui.HomeScreen
 import chat.nyutag.messenger.ui.LanguageScreen
+import chat.nyutag.messenger.ui.LocalAvatars
+import chat.nyutag.messenger.ui.LocalWallpapers
+import chat.nyutag.messenger.ui.Wallpapers
 import chat.nyutag.messenger.ui.LocalPalette
 import chat.nyutag.messenger.ui.LocalWords
 import chat.nyutag.messenger.ui.NyutagTheme
@@ -41,9 +44,11 @@ class MainActivity : ComponentActivity() {
         val words = Words(app.prefs)
         val session = app.session
         session.launch()
+        val wallpapers = Wallpapers(applicationContext)
         setContent {
             NyutagTheme {
-                CompositionLocalProvider(LocalWords provides words) {
+                CompositionLocalProvider(LocalWords provides words, LocalAvatars provides session,
+                                         LocalWallpapers provides wallpapers) {
                     val phase by session.phase.collectAsState()
                     var openRoom by rememberSaveable { mutableStateOf<String?>(null) }
                     var tab by rememberSaveable { mutableIntStateOf(0) }

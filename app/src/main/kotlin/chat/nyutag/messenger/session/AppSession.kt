@@ -4,6 +4,8 @@
 package chat.nyutag.messenger.session
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.util.LruCache
 import android.os.Build
 import android.util.Log
 import chat.nyutag.core.auth.AccountKeeper
@@ -16,6 +18,10 @@ import chat.nyutag.core.crypto.sendEncrypted
 import chat.nyutag.core.crypto.importCrossSigning
 import chat.nyutag.core.crypto.relockWithPassword
 import chat.nyutag.core.crypto.unlockWithPassword
+import chat.nyutag.core.media.MXC
+import chat.nyutag.core.media.MediaCache
+import chat.nyutag.core.media.ThumbnailMethod
+import chat.nyutag.core.media.uploadMedia
 import chat.nyutag.core.net.MatrixError
 import chat.nyutag.core.nyutag.IssuedInvite
 import chat.nyutag.core.nyutag.InviteCode
@@ -64,6 +70,7 @@ import chat.nyutag.core.rooms.profileFieldsAPI
 import chat.nyutag.core.rooms.profile
 import chat.nyutag.core.rooms.searchUsers
 import chat.nyutag.core.rooms.send
+import chat.nyutag.core.rooms.setAvatarURL
 import chat.nyutag.core.rooms.setDisplayName
 import chat.nyutag.core.rooms.setReadMarkers
 import chat.nyutag.core.rooms.setTyping
@@ -76,6 +83,7 @@ import chat.nyutag.json.JsonValue
 import chat.nyutag.messenger.BuildConfig
 import chat.nyutag.messenger.data.AndroidSql
 import chat.nyutag.messenger.data.KeystoreVault
+import chat.nyutag.messenger.data.Pictures
 import chat.nyutag.messenger.doors.DoorHub
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -133,6 +141,15 @@ class AppSession(context: Context, private val doors: DoorHub) {
 
     @Volatile var me: String? = null
         private set
+    /** Свой аватар (`mxc://…`) или `null` — без фото. */
+    private val myAvatarFlow = MutableStateFlow<String?>(null)
+    val myAvatar: StateFlow<String?> get() = myAvatarFlow
+    /** Кэш медиа на диске (cacheDir: система может его чистить) и раскодированные аватары в памяти, по объёму. */
+    private val mediaDirectory = File(context.cacheDir, "media")
+    @Volatile private var media: MediaCache? = null
+    private val avatarMemory = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
     private var ignored: Set<String> = emptySet()
     var muted: Set<String> = emptySet()
         private set
@@ -266,6 +283,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private suspend fun start(account: SignedInAccount, password: String?) {
         this.account = account
         me = account.session.userID
+        media = MediaCache(account.client, mediaDirectory)
+        scope.launch { myAvatarFlow.value = profile(account.session.userID)?.avatarURL?.ifEmpty { null } }
         val engine = SyncEngine(account.client, account.store, account.session, scope)
         this.engine = engine
         phaseFlow.value = Phase.SIGNED_IN
@@ -307,6 +326,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
         engine?.stop()
         engine = null
         machine = null
+        media = null
+        myAvatarFlow.value = null
+        avatarMemory.evictAll()
     }
 
     // MARK: Старая история
@@ -729,6 +751,55 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val account = account ?: return null
         return runCatching { account.client.profile(userID) }.getOrNull()
     }
+
+    /** Свой аватар: квадратный JPEG грузим на сервер и пишем адрес в профиль; `null` — убрать аватар. */
+    suspend fun setAvatar(jpeg: ByteArray?): Boolean {
+        val account = account ?: return false
+        val me = me ?: return false
+        return try {
+            if (jpeg != null) {
+                val mxc = account.client.uploadMedia(jpeg, "image/jpeg", "avatar.jpg")
+                account.client.setAvatarURL(me, mxc.toString())
+                runCatching { media?.store(jpeg, mxc) }
+                myAvatarFlow.value = mxc.toString()
+            } else {
+                account.client.setAvatarURL(me, "")
+                myAvatarFlow.value = null
+            }
+            log("аватар ${myAvatarFlow.value ?: "убран"}")
+            true
+        } catch (e: Exception) {
+            log("аватар не загружен: $e")
+            false
+        }
+    }
+
+    /** Аватар из памяти без ожидания: строка списка сразу рисуется с фото, без мигания буквы. */
+    fun cachedAvatar(url: String, pixels: Int): Bitmap? = avatarMemory.get(avatarKey(url, pixels))
+
+    /** Квадратная миниатюра аватара. Размер округляем до трёх ступеней, чтобы кэш не множился. */
+    suspend fun avatar(url: String, pixels: Int): Bitmap? {
+        val mxc = MXC.parse(url) ?: return null
+        val key = avatarKey(url, pixels)
+        avatarMemory.get(key)?.let { return it }
+        val media = media ?: return null
+        val side = avatarSide(pixels)
+        val data = runCatching { media.data(mxc, MediaCache.Size(side, side), ThumbnailMethod.CROP) }.getOrNull() ?: return null
+        val image = withContext(Dispatchers.Default) { Pictures.decode(data, side) } ?: return null
+        avatarMemory.put(key, image)
+        return image
+    }
+
+    /** Аватар целиком, для показа во весь экран. */
+    suspend fun avatarFull(url: String): Bitmap? {
+        val mxc = MXC.parse(url) ?: return null
+        val data = runCatching { media?.data(mxc) }.getOrNull() ?: return null
+        return withContext(Dispatchers.Default) { Pictures.decode(data, 2048) }
+    }
+
+    private fun avatarSide(pixels: Int) = if (pixels <= 96) 96 else if (pixels <= 192) 192 else 384
+
+    private fun avatarKey(url: String, pixels: Int) = "$url#${avatarSide(pixels)}"
 
     /** Указан ли свой номер (сам номер сервер не отдаёт); `null` — не удалось узнать. */
     suspend fun hasPhone(): Boolean? {

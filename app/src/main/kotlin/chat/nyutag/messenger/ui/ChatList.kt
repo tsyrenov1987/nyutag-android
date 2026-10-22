@@ -49,12 +49,13 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
     val typing by session.typing.collectAsState()
     val history by session.history.collectAsState()
     val locked = history == PasswordUnlockOutcome.NeedsRecoveryKey
+    val myAvatar by session.myAvatar.collectAsState()
     Column(Modifier.fillMaxSize().background(palette.milk)) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text(words(P.chats), color = palette.ink, fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             Box(Modifier.clip(CircleShape).clickable(onClick = onMe).padding(6.dp)) {
-                Pillow(session.me.orEmpty(), ChatDigest.localpart(session.me.orEmpty()), 36.dp)
+                Pillow(session.me.orEmpty(), ChatDigest.localpart(session.me.orEmpty()), 36.dp, myAvatar)
             }
         }
         if (locked) Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { LockedHistoryCard(onHistoryKey) }
@@ -77,7 +78,7 @@ internal fun ChatRow(line: ChatLine, typingIDs: List<String>?, words: Words, onC
     val typing = typingIDs?.firstOrNull()?.let { if (line.isDirect) words(P.typingNow) else words(P.typingName, ChatDigest.localpart(it)) }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card).clickable(onClick = onClick).padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Pillow(line.id, line.title.ifEmpty { "·" })
+        Pillow(line.id, line.title.ifEmpty { "·" }, avatar = line.avatarURL)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 // Название с замком занимают всё место до времени; замок идёт сразу за текстом, а не у края.

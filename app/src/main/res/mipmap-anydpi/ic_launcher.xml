@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Иконка как на iOS (AppIcon.icon): юрта с соёмбо на синем. minSdk 29, поэтому только адаптивная. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/launcher_back" />
+    <foreground android:drawable="@drawable/launcher_mark" />
+    <monochrome android:drawable="@drawable/launcher_mark" />
+</adaptive-icon>

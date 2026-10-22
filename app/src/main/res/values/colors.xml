@@ -7,4 +7,6 @@
     <color name="widget_sky">#2347A6</color>
     <color name="widget_gold">#C9971C</color>
     <color name="widget_good">#1F8A5B</color>
+    <!-- Фон иконки приложения — синий из iOS AppIcon.icon. -->
+    <color name="launcher_back">#1C6FB3</color>
 </resources>

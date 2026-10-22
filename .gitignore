@@ -16,3 +16,4 @@ app/google-services.json
 .DS_Store
 .idea/
 *.iml
+*.local.properties

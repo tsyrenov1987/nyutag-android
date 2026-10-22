@@ -47,11 +47,12 @@ class MainActivity : ComponentActivity() {
                     val phase by session.phase.collectAsState()
                     var openRoom by rememberSaveable { mutableStateOf<String?>(null) }
                     var tab by rememberSaveable { mutableIntStateOf(0) }
+                    var community by rememberSaveable { mutableStateOf<String?>(null) }
                     // Без входа: форма входа, регистрация или сброс пароля.
                     var entry by rememberSaveable { mutableStateOf(Entry.SIGN_IN) }
                     LaunchedEffect(phase) {
                         if (phase == AppSession.Phase.SIGNED_IN) entry = Entry.SIGN_IN
-                        if (phase == AppSession.Phase.SIGNED_OUT) tab = 0
+                        if (phase == AppSession.Phase.SIGNED_OUT) { tab = 0; community = null }
                     }
                     when {
                         words.lang == null -> LanguageScreen(words)
@@ -65,7 +66,7 @@ class MainActivity : ComponentActivity() {
                             Entry.RESET -> PasswordResetScreen(session, app.doors) { entry = Entry.SIGN_IN }
                         }
                         openRoom != null -> ChatScreen(session, openRoom!!) { openRoom = null }
-                        else -> HomeScreen(session, tab, { tab = it }) { openRoom = it }
+                        else -> HomeScreen(session, tab, { tab = it }, community, { community = it }) { openRoom = it }
                     }
                 }
             }

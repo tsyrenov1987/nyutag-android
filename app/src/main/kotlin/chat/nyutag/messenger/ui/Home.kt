@@ -1,4 +1,5 @@
-// Нютаг. Главный экран: вкладки внизу (выбранная живёт в окне, чтобы вернуться на неё из чата), как на iOS (Чаты | Контакты; сообщества и календарь — следующими срезами).
+// Нютаг. Главный экран: вкладки внизу (выбранная живёт в окне, чтобы вернуться на неё из чата), как на iOS (Чаты | Контакты | Сообщества; календарь — следующим срезом).
+// Открытое сообщество тоже живёт в окне: из чата его группы возвращаемся в карточку.
 // Значки рисуем сами: набора иконок в зависимостях нет.
 
 package chat.nyutag.messenger.ui
@@ -36,25 +37,37 @@ import androidx.compose.ui.unit.sp
 import chat.nyutag.messenger.session.AppSession
 
 @Composable
-fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, onOpen: (String) -> Unit) {
+fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: String?, onCommunity: (String?) -> Unit,
+               onOpen: (String) -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     var inviting by rememberSaveable { mutableStateOf(false) }
+    var founding by rememberSaveable { mutableStateOf(false) }
     if (inviting) {
         InviteScreen(session) { inviting = false }
+        return
+    }
+    if (founding) {
+        NewCommunityScreen(session, onClose = { founding = false }) { founding = false; onCommunity(it) }
+        return
+    }
+    if (tab == 2 && community != null) {
+        CommunityScreen(session, community, onClose = { onCommunity(null) }, onOpen = onOpen)
         return
     }
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding()) {
         Box(Modifier.weight(1f)) {
             when (tab) {
                 0 -> ChatListScreen(session, onOpen, onInvite = { inviting = true })
-                else -> ContactsScreen(session, onOpen, onInvite = { inviting = true })
+                1 -> ContactsScreen(session, onOpen, onInvite = { inviting = true })
+                else -> CommunitiesScreen(session, onCommunity = { onCommunity(it) }, onNew = { founding = true })
             }
         }
         HorizontalDivider(color = palette.plate)
         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
             TabItem(words(P.chats), tab == 0, Modifier.weight(1f), ::bubbles) { onTab(0) }
             TabItem(words(P.contacts), tab == 1, Modifier.weight(1f), ::people) { onTab(1) }
+            TabItem(words(P.communities), tab == 2, Modifier.weight(1f), ::hexagons) { onTab(2) }
         }
     }
 }
@@ -88,4 +101,23 @@ private fun people(scope: DrawScope, color: Color) = with(scope) {
     drawArc(color, 180f, 180f, false, Offset(w * 0.46f, h * 0.56f), Size(w * 0.46f, h * 0.70f), style = stroke)
     drawCircle(color, h * 0.20f, Offset(w * 0.36f, h * 0.30f))
     drawArc(color, 180f, 180f, true, Offset(w * 0.08f, h * 0.58f), Size(w * 0.56f, h * 0.80f))
+}
+
+/** Соты: три шестиугольника, как значок сообществ на iOS. */
+private fun hexagons(scope: DrawScope, color: Color) = with(scope) {
+    val r = size.height * 0.24f
+    val stroke = Stroke(width = 1.6.dp.toPx())
+    val dx = r * 1.732f / 2f
+    val centers = listOf(Offset(size.width / 2f - dx, size.height * 0.68f), Offset(size.width / 2f + dx, size.height * 0.68f),
+                         Offset(size.width / 2f, size.height * 0.68f - r * 1.5f))
+    for (c in centers) {
+        val path = androidx.compose.ui.graphics.Path()
+        for (i in 0 until 6) {
+            val a = Math.toRadians(60.0 * i - 90.0)
+            val p = Offset(c.x + r * Math.cos(a).toFloat(), c.y + r * Math.sin(a).toFloat())
+            if (i == 0) path.moveTo(p.x, p.y) else path.lineTo(p.x, p.y)
+        }
+        path.close()
+        drawPath(path, color, style = stroke)
+    }
 }

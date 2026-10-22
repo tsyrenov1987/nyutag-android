@@ -23,13 +23,25 @@ import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
 import chat.nyutag.core.rooms.IgnoredUsers
 import chat.nyutag.core.rooms.MutedRooms
+import chat.nyutag.core.rooms.CreateRoom
 import chat.nyutag.core.rooms.People
 import chat.nyutag.core.rooms.Person
+import chat.nyutag.core.rooms.PublicRoom
 import chat.nyutag.core.rooms.Relations
 import chat.nyutag.core.rooms.TransactionID
 import chat.nyutag.core.rooms.backfill
+import chat.nyutag.core.rooms.addSpaceChild
 import chat.nyutag.core.rooms.createDirectRoom
+import chat.nyutag.core.rooms.createRoom
 import chat.nyutag.core.rooms.join
+import chat.nyutag.core.rooms.knock
+import chat.nyutag.core.rooms.leave
+import chat.nyutag.core.rooms.publicCommunities
+import chat.nyutag.core.rooms.roomHierarchy
+import chat.nyutag.core.rooms.setRoomVisibility
+import chat.nyutag.core.rooms.setSpaceParent
+import chat.nyutag.core.rooms.setState
+import chat.nyutag.core.rooms.state
 import chat.nyutag.core.rooms.person
 import chat.nyutag.core.rooms.profile
 import chat.nyutag.core.rooms.searchUsers
@@ -67,6 +79,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
 
     enum class InviteFailure { LIMIT, NO_NETWORK, BROKEN }
 
+    enum class CommunityJoin { JOINED, REQUESTED, FAILED }
+
     class InviteException(val failure: InviteFailure) : Exception(failure.name)
 
     class SignInException(val failure: SignInFailure) : Exception(failure.name)
@@ -80,6 +94,12 @@ class AppSession(context: Context, private val doors: DoorHub) {
     val phase: StateFlow<Phase> get() = phaseFlow
     private val linesFlow = MutableStateFlow<List<ChatLine>>(emptyList())
     val lines: StateFlow<List<ChatLine>> get() = linesFlow
+    /** Сообщества, где мы участник: пространства `m.space` из той же базы. */
+    private val communitiesFlow = MutableStateFlow<List<ChatLine>>(emptyList())
+    val communities: StateFlow<List<ChatLine>> get() = communitiesFlow
+    /** Последний ответ каталога: карточка сообщества берёт оттуда описание и правило входа. */
+    @Volatile var catalog: List<PublicRoom> = emptyList()
+        private set
     /** Растёт на каждый /sync: открытый чат перечитывает ленту. */
     private val revisionFlow = MutableStateFlow(0)
     val revision: StateFlow<Int> get() = revisionFlow
@@ -147,6 +167,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
         opened.clear()
         autoJoined.clear()
         linesFlow.value = emptyList()
+        communitiesFlow.value = emptyList()
+        catalog = emptyList()
         typingFlow.value = emptyMap()
         historyFlow.value = null
         matchedAt = 0L
@@ -205,7 +227,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
             runCatching { MutedRooms.load(account.store) }.getOrNull()?.let { muted = it }
             runCatching { ChatDigest.lines(account.store, me, ignored, ::open) }.getOrNull()?.let { fresh ->
                 val chats = fresh.filter { !it.isSpace }
+                val spaces = fresh.filter { it.isSpace && it.membership == RoomRecord.Membership.JOIN }
                 if (chats != linesFlow.value) linesFlow.value = chats
+                if (spaces != communitiesFlow.value) communitiesFlow.value = spaces
             }
         }
         acceptInvites(account)
@@ -386,6 +410,101 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val account = account ?: return false
         return runCatching { NyutagService(account.client).revokeInvite(code) }.isSuccess
     }
+
+    // MARK: Сообщества
+
+    /** Каталог сообществ сервера; `null` — нет связи. */
+    suspend fun findCommunities(term: String): List<PublicRoom>? {
+        val account = account ?: return null
+        val search = term.trim().ifEmpty { null }
+        return try {
+            account.client.publicCommunities(search = search, limit = 100).rooms.sortedByDescending { it.numJoinedMembers }
+                .also { if (search == null) catalog = it else catalog = (it + catalog).distinctBy(PublicRoom::roomID) }
+        } catch (e: Exception) {
+            log("каталог сообществ: $e")
+            null
+        }
+    }
+
+    /** Группы сообщества (дети первого уровня) и можем ли мы их добавлять; `null` — не узнали. */
+    suspend fun communityGroups(spaceID: String): Pair<List<PublicRoom>, Boolean>? {
+        val account = account ?: return null
+        val me = me ?: return null
+        val page = runCatching { account.client.roomHierarchy(spaceID, maxDepth = 1) }.getOrNull() ?: return null
+        val groups = page.rooms.map { it.room }.filter { it.roomID != spaceID && !it.isSpace }
+        val power = runCatching { account.client.state(spaceID, "m.room.power_levels") }.getOrNull()
+        val mine = power?.get("users")?.get(me)?.int ?: power?.get("users_default")?.int ?: 0
+        val needed = power?.get("events")?.get("m.space.child")?.int ?: power?.get("state_default")?.int ?: 50
+        return groups to (power != null && mine >= needed)
+    }
+
+    /** Открытое — вступаем сразу, закрытое (`knock`) — подаём заявку. */
+    suspend fun joinCommunity(spaceID: String, joinRule: String?): CommunityJoin {
+        val account = account ?: return CommunityJoin.FAILED
+        return try {
+            if (joinRule == "knock") {
+                account.client.knock(spaceID, via = listOfNotNull(server))
+                CommunityJoin.REQUESTED
+            } else {
+                account.client.join(spaceID, listOfNotNull(server))
+                refresh()
+                CommunityJoin.JOINED
+            }
+        } catch (e: Exception) {
+            log("вступление в сообщество: $e")
+            CommunityJoin.FAILED
+        }
+    }
+
+    suspend fun leaveCommunity(spaceID: String): Boolean {
+        val engine = engine ?: return false
+        if (runCatching { engine.leave(spaceID, forget = true) }.isFailure) return false
+        refresh()
+        return true
+    }
+
+    /** Новое сообщество: пространство в каталоге сервера; закрытое пускает по заявке. Возвращает id. */
+    suspend fun createCommunity(name: String, about: String, open: Boolean): String? {
+        val account = account ?: return null
+        val topic = about.trim().ifEmpty { null }
+        val spaceID = runCatching {
+            account.client.createRoom(CreateRoom(name = name, topic = topic, preset = "public_chat", encrypted = false, roomType = "m.space"))
+        }.getOrNull() ?: return null
+        runCatching { account.client.setRoomVisibility(spaceID, public = true) }
+        if (!open) runCatching { account.client.setState(spaceID, "m.room.join_rules", content = JsonValue.of("join_rule" to "knock")) }
+        log("сообщество создано, ${if (open) "открытое" else "закрытое"}")
+        refresh()
+        return spaceID
+    }
+
+    /** Группа внутри сообщества: шифрованная комната, входят участники сообщества. Возвращает id. */
+    suspend fun createGroup(name: String, spaceID: String): String? {
+        val account = account ?: return null
+        val server = server ?: return null
+        val roomID = runCatching { account.client.createRoom(CreateRoom(name = name)) }.getOrNull() ?: return null
+        val rule = JsonValue.of("join_rule" to "restricted",
+                                "allow" to JsonValue.list(JsonValue.of("type" to "m.room_membership", "room_id" to spaceID)))
+        try {
+            account.client.addSpaceChild(spaceID, roomID, listOf(server))
+            runCatching { account.client.setSpaceParent(roomID, spaceID, listOf(server), canonical = true) }
+            runCatching { account.client.setState(roomID, "m.room.join_rules", content = rule) }
+        } catch (e: Exception) {
+            runCatching { account.client.leave(roomID) }
+            return null
+        }
+        log("группа сообщества создана")
+        return roomID
+    }
+
+    /** Группа из сообщества: уже в ней — просто открываем, иначе входим. */
+    suspend fun joinGroup(roomID: String): Boolean {
+        val account = account ?: return false
+        if (linesFlow.value.any { it.id == roomID && it.membership == RoomRecord.Membership.JOIN }) return true
+        return runCatching { account.client.join(roomID, listOfNotNull(server)) }.isSuccess
+    }
+
+    /** Домен своей учётки: через него входим в комнаты сервера. */
+    private val server: String? get() = me?.substringAfter(':', "")?.ifEmpty { null }
 
     private fun log(line: String) {
         if (BuildConfig.DEBUG) Log.d("ui-check", line)

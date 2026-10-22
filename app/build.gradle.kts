@@ -70,6 +70,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.fragment)
     implementation(libs.google.billing)
     implementation(libs.google.firebase.messaging)
 }

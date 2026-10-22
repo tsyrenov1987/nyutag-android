@@ -84,6 +84,7 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
         "delete" -> { DeleteAccountScreen(session) { page = "" }; return }
         "devices" -> { DevicesScreen(session) { page = "" }; return }
         "wallpaper" -> { WallpaperPicker(null) { page = "" }; return }
+        "donate" -> { DonateScreen { page = "" }; return }
     }
     BackHandler(onBack = onClose)
     val me = session.me.orEmpty()
@@ -108,6 +109,8 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
             MenuRow(words(P.inviteFriend), palette.sky) { onInvite() }
             FormDivider()
             MenuRow(words(P.wallpaper), palette.sky) { page = "wallpaper" }
+            FormDivider()
+            MenuRow(words(P.donate), palette.gold) { page = "donate" }
         }
         Section(words(P.language), footer = words(P.buryatLettersHint)) {
             FormCard {

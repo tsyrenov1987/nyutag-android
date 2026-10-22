@@ -1,4 +1,5 @@
-// Приложение «Нютаг» для Android. Зависимости — только Kotlin/корутины и AndroidX/Jetpack.
+// Приложение «Нютаг» для Android. Зависимости — только Kotlin/корутины и AndroidX/Jetpack,
+// плюс Google Play Billing для пожертвований (исключение по слову владельца).
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -42,4 +43,5 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.google.billing)
 }

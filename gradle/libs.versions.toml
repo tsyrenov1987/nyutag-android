@@ -1,4 +1,5 @@
 # Нютаг. В приложение попадают только Kotlin, его корутины и AndroidX/Jetpack (платформа Android).
+# Исключение по слову владельца (21.10): Google Play Billing — только для «Поддержать Нютаг».
 # JUnit и sqlite-jdbc — только для тестов на Маке, в сборку не входят.
 [versions]
 agp = "9.2.1"
@@ -9,6 +10,7 @@ lifecycle = "2.9.4"
 activityCompose = "1.11.0"
 composeBom = "2026.09.00"
 material3 = "1.5.0-alpha29"
+billing = "9.1.0"
 junit = "5.10.1"
 sqliteJdbc = "3.50.3.0"
 
@@ -23,6 +25,7 @@ androidx-activity-compose = { group = "androidx.activity", name = "activity-comp
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
+google-billing = { group = "com.android.billingclient", name = "billing-ktx", version.ref = "billing" }
 junit-jupiter = { group = "org.junit.jupiter", name = "junit-jupiter", version.ref = "junit" }
 junit-platform-launcher = { group = "org.junit.platform", name = "junit-platform-launcher" }
 sqlite-jdbc = { group = "org.xerial", name = "sqlite-jdbc", version.ref = "sqliteJdbc" }

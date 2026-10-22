@@ -4,6 +4,7 @@
 
 Клиент пишется с нуля на Kotlin, как и версия для iOS (`tsyrenov1987/nyutag-ios`). Сторонних библиотек нет:
 только Android SDK, Jetpack Compose и стандартная библиотека Java (`javax.crypto`, `java.math.BigInteger`, `HttpsURLConnection`, SQLite из состава ОС).
+Единственное исключение — Google Play Billing для кнопки «Поддержать Нютаг»: принимать деньги в приложении из Google Play иначе нельзя.
 К ядру клиент ходит обычным HTTPS через «двери» — несколько адресов с сертификатами Let's Encrypt.
 
 ## Состав

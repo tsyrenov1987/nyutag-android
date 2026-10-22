@@ -20,6 +20,7 @@ import chat.nyutag.core.net.MatrixError
 import chat.nyutag.core.nyutag.IssuedInvite
 import chat.nyutag.core.nyutag.InviteCode
 import chat.nyutag.core.nyutag.NyutagService
+import chat.nyutag.core.rooms.AccountDevice
 import chat.nyutag.core.rooms.ChatDigest
 import chat.nyutag.core.rooms.ChatFeed
 import chat.nyutag.core.rooms.ChatLine
@@ -36,11 +37,14 @@ import chat.nyutag.core.rooms.backfill
 import chat.nyutag.core.rooms.addSpaceChild
 import chat.nyutag.core.rooms.createDirectRoom
 import chat.nyutag.core.rooms.createRoom
+import chat.nyutag.core.rooms.deleteDevice
+import chat.nyutag.core.rooms.devices
 import chat.nyutag.core.rooms.join
 import chat.nyutag.core.rooms.knock
 import chat.nyutag.core.rooms.leave
 import chat.nyutag.core.rooms.publicCommunities
 import chat.nyutag.core.rooms.redact
+import chat.nyutag.core.rooms.renameDevice
 import chat.nyutag.core.rooms.roomHierarchy
 import chat.nyutag.core.rooms.setRoomVisibility
 import chat.nyutag.core.rooms.setSpaceParent
@@ -205,6 +209,39 @@ class AppSession(context: Context, private val doors: DoorHub) {
         }
         clear()
         log("аккаунт удалён")
+    }
+
+    /** Это устройство: в списке «Устройства» оно первое и без кнопки выхода. */
+    val deviceID: String? get() = account?.session?.deviceID
+
+    /** Где открыт аккаунт: своё устройство первым. Нет связи — [SignInFailure.NO_NETWORK], прочее — [SignInFailure.BROKEN]. */
+    suspend fun devices(): List<AccountDevice> {
+        val account = account ?: throw SignInException(SignInFailure.BROKEN)
+        if (!doors.waitUntilUp()) throw SignInException(SignInFailure.NO_NETWORK)
+        val list = runCatching { account.client.devices() }
+            .getOrElse { log("список устройств не пришёл: $it"); throw SignInException(SignInFailure.BROKEN) }
+        return AccountDevice.sorted(list, account.session.deviceID)
+    }
+
+    suspend fun renameDevice(deviceID: String, name: String): Boolean {
+        val account = account ?: return false
+        return runCatching { account.client.renameDevice(deviceID, name) }.onFailure { log("переименование не прошло: $it") }.isSuccess
+    }
+
+    /** Выйти на чужом устройстве, подтвердив паролем; ошибки — как при удалении аккаунта. */
+    suspend fun signOutDevice(deviceID: String, password: String) {
+        val account = account ?: throw SignInException(SignInFailure.BROKEN)
+        if (!doors.waitUntilUp()) throw SignInException(SignInFailure.NO_NETWORK)
+        try {
+            account.client.deleteDevice(deviceID, account.session.userID, password)
+        } catch (e: MatrixError) {
+            log("отказ выхода на устройстве: $e")
+            throw SignInException(failure(e))
+        } catch (e: Exception) {
+            log("отказ выхода на устройстве: $e")
+            throw SignInException(SignInFailure.BROKEN)
+        }
+        log("вышли на устройстве $deviceID")
     }
 
     private fun clear() {

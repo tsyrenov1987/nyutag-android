@@ -1,5 +1,5 @@
 // Нютаг. Меню под своим аватаром, как MeMenu на iOS: профиль, «Избранное», приглашение, язык; выход и удаление
-// аккаунта спрятаны в «Дополнительно». Отсюда же правка профиля (имя, «о себе», номер, восточный год).
+// аккаунта и список устройств спрятаны в «Дополнительно». Отсюда же правка профиля (имя, «о себе», номер, восточный год).
 
 package chat.nyutag.messenger.ui
 
@@ -47,7 +47,7 @@ import chat.nyutag.messenger.session.AppSession
 import java.time.LocalDate
 import kotlinx.coroutines.launch
 
-private val Danger = Color(0xFFD03A2F)
+internal val Danger = Color(0xFFD03A2F)
 
 @Composable
 fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit, onInvite: () -> Unit) {
@@ -59,6 +59,7 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
     when (page) {
         "profile" -> { ProfileEditScreen(session) { page = "" }; return }
         "delete" -> { DeleteAccountScreen(session) { page = "" }; return }
+        "devices" -> { DevicesScreen(session) { page = "" }; return }
     }
     BackHandler(onBack = onClose)
     val me = session.me.orEmpty()
@@ -101,6 +102,8 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
         }
         Section(words(P.advanced)) {
             FormCard {
+                MenuRow(words(P.devices), palette.ink) { page = "devices" }
+                FormDivider()
                 MenuRow(words(P.signOut), palette.ink) { askSignOut = true }
                 FormDivider()
                 MenuRow(words(P.deleteAccount), Danger) { page = "delete" }

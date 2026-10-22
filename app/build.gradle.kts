@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "chat.nyutag.messenger"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "chat.nyutag.messenger"
@@ -26,7 +26,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 }
 
 dependencies {

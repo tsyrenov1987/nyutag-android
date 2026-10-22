@@ -43,8 +43,13 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     val palette = LocalPalette.current
     var inviting by rememberSaveable { mutableStateOf(false) }
     var founding by rememberSaveable { mutableStateOf(false) }
+    var meOpen by rememberSaveable { mutableStateOf(false) }
     if (inviting) {
         InviteScreen(session) { inviting = false }
+        return
+    }
+    if (meOpen) {
+        MeScreen(session, onClose = { meOpen = false }, onOpen = onOpen, onInvite = { inviting = true })
         return
     }
     if (founding) {
@@ -58,7 +63,7 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding()) {
         Box(Modifier.weight(1f)) {
             when (tab) {
-                0 -> ChatListScreen(session, onOpen, onInvite = { inviting = true })
+                0 -> ChatListScreen(session, onOpen, onMe = { meOpen = true })
                 1 -> ContactsScreen(session, onOpen, onInvite = { inviting = true })
                 2 -> CommunitiesScreen(session, onCommunity = { onCommunity(it) }, onNew = { founding = true })
                 else -> CalendarScreen()

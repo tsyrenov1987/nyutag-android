@@ -526,15 +526,22 @@ fun PasswordResetScreen(session: AppSession, doors: DoorHub, onClose: () -> Unit
 
 /** Страница формы: полоса с «Отмена» и заголовком, ниже прокручиваемое содержимое. */
 @Composable
-internal fun FormPage(title: String, onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+internal fun FormPage(title: String, onClose: () -> Unit, closeTitle: String? = null, action: String? = null,
+                      actionEnabled: Boolean = true, onAction: () -> Unit = {}, content: @Composable ColumnScope.() -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding().imePadding()) {
         Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp)) {
-            Text(words(P.cancel), color = palette.sky, fontSize = 17.sp,
+            Text(closeTitle ?: words(P.cancel), color = palette.sky, fontSize = 17.sp,
                  modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = onClose).padding(vertical = 8.dp))
-            Text(title, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
-                 modifier = Modifier.align(Alignment.Center))
+            // Длинный заголовок не должен заезжать на кнопки по краям.
+            Text(title, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                 modifier = Modifier.align(Alignment.Center).padding(horizontal = 84.dp))
+            if (action != null) {
+                Text(action, color = if (actionEnabled) palette.sky else palette.quiet, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                     modifier = Modifier.align(Alignment.CenterEnd).clickable(enabled = actionEnabled, onClick = onAction).padding(vertical = 8.dp))
+            }
         }
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp),
                verticalArrangement = Arrangement.spacedBy(18.dp), content = content)
@@ -561,7 +568,7 @@ internal fun fieldColors(): TextFieldColors {
 }
 
 @Composable
-private fun FormField(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier,
+internal fun FormField(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier,
                       keyboard: KeyboardOptions = KeyboardOptions.Default, secret: Boolean = false, mono: Boolean = false,
                       onGo: () -> Unit = {}) {
     TextField(value, onChange, modifier.fillMaxWidth(), singleLine = true, colors = fieldColors(),

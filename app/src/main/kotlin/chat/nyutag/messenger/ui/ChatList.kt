@@ -17,16 +17,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,30 +39,19 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.time.temporal.ChronoUnit
-import kotlinx.coroutines.launch
 
 @Composable
-fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onInvite: () -> Unit) {
+fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     val lines by session.lines.collectAsState()
     val typing by session.typing.collectAsState()
-    val scope = rememberCoroutineScope()
-    var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().background(palette.milk)) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text(words(P.chats), color = palette.ink, fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Box {
-                Text("⋯", color = palette.sky, fontSize = 26.sp,
-                     modifier = Modifier.clip(CircleShape).clickable { menu = true }.padding(horizontal = 14.dp, vertical = 4.dp))
-                DropdownMenu(menu, { menu = false }) {
-                    DropdownMenuItem({ Text(words(P.inviteFriend)) }, { menu = false; onInvite() })
-                    for (lang in Lang.entries) {
-                        DropdownMenuItem({ Text(lang.ownName) }, { menu = false; words.choose(lang) })
-                    }
-                    DropdownMenuItem({ Text(words(P.signOut)) }, { menu = false; scope.launch { session.signOut() } })
-                }
+            Box(Modifier.clip(CircleShape).clickable(onClick = onMe).padding(6.dp)) {
+                Pillow(session.me.orEmpty(), ChatDigest.localpart(session.me.orEmpty()), 36.dp)
             }
         }
         if (lines.isEmpty()) {

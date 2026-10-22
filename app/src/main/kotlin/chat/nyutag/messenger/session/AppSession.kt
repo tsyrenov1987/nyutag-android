@@ -43,6 +43,13 @@ import chat.nyutag.core.rooms.setSpaceParent
 import chat.nyutag.core.rooms.setState
 import chat.nyutag.core.rooms.state
 import chat.nyutag.core.rooms.person
+import chat.nyutag.core.rooms.Profile
+import chat.nyutag.core.rooms.ProfileAbout
+import chat.nyutag.core.rooms.SavedMessages
+import chat.nyutag.core.rooms.applyProfileEdits
+import chat.nyutag.core.rooms.createSavedMessages
+import chat.nyutag.core.rooms.deactivate
+import chat.nyutag.core.rooms.profileFieldsAPI
 import chat.nyutag.core.rooms.profile
 import chat.nyutag.core.rooms.searchUsers
 import chat.nyutag.core.rooms.send
@@ -162,6 +169,32 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val account = account ?: return
         stop()
         withContext(Dispatchers.IO) { keeper.signOut(account) }
+        clear()
+    }
+
+    /** Удалить аккаунт на сервере навсегда; после этого приложение само уходит на экран входа. */
+    suspend fun deleteAccount(password: String) {
+        val account = account ?: throw SignInException(SignInFailure.BROKEN)
+        if (!doors.waitUntilUp()) throw SignInException(SignInFailure.NO_NETWORK)
+        try {
+            account.client.deactivate(account.session.userID, password)
+        } catch (e: MatrixError) {
+            log("отказ удаления аккаунта: $e")
+            throw SignInException(failure(e))
+        } catch (e: Exception) {
+            log("отказ удаления аккаунта: $e")
+            throw SignInException(SignInFailure.BROKEN)
+        }
+        stop()
+        withContext(Dispatchers.IO) {
+            runCatching { account.store.close() }
+            runCatching { keeper.forget(account.session.userID) }
+        }
+        clear()
+        log("аккаунт удалён")
+    }
+
+    private fun clear() {
         this.account = null
         me = null
         opened.clear()
@@ -501,6 +534,61 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val account = account ?: return false
         if (linesFlow.value.any { it.id == roomID && it.membership == RoomRecord.Membership.JOIN }) return true
         return runCatching { account.client.join(roomID, listOfNotNull(server)) }.isSuccess
+    }
+
+    // MARK: Избранное
+
+    /** Чат с собой: известный — открываем (имя по умолчанию переводим на язык телефона), иначе заводим новый. */
+    suspend fun openSaved(name: String, topic: String): String? {
+        val account = account ?: return null
+        val me = me ?: return null
+        val known = withContext(Dispatchers.IO) { runCatching { SavedMessages.load(account.store) }.getOrNull() }
+        val membership = known?.let { withContext(Dispatchers.IO) { runCatching { account.store.room(it)?.membership }.getOrNull() } }
+        if (known != null && (membership == RoomRecord.Membership.JOIN || membership == RoomRecord.Membership.INVITE)) {
+            if (membership == RoomRecord.Membership.INVITE) runCatching { account.client.join(known) }
+            val title = linesFlow.value.firstOrNull { it.id == known }?.title
+            if (title != null && SavedMessages.needsRename(title, name)) {
+                runCatching { account.client.setState(known, EventType.NAME, content = JsonValue.of("name" to name)) }
+            }
+            return known
+        }
+        val roomID = runCatching { account.client.createSavedMessages(name, topic, me, account.store) }.getOrNull()
+        log("избранное ${if (roomID == null) "не создано" else "создано"}")
+        return roomID
+    }
+
+    // MARK: Профиль
+
+    suspend fun profile(userID: String): Profile? {
+        val account = account ?: return null
+        return runCatching { account.client.profile(userID) }.getOrNull()
+    }
+
+    /** Указан ли свой номер (сам номер сервер не отдаёт); `null` — не удалось узнать. */
+    suspend fun hasPhone(): Boolean? {
+        val account = account ?: return null
+        return runCatching { NyutagService(account.client).hasPhone() }.getOrNull()
+    }
+
+    suspend fun setPhone(phone: String): Boolean {
+        val account = account ?: return false
+        return runCatching { NyutagService(account.client).setPhone(phone) }.isSuccess
+    }
+
+    /** Имя и «о себе»: отправляем только то, что изменилось. */
+    suspend fun saveProfile(name: String, about: ProfileAbout, old: Profile): Boolean {
+        val account = account ?: return false
+        val me = me ?: return false
+        return try {
+            val clean = name.trim()
+            if (clean.isNotEmpty() && clean != old.displayName) account.client.setDisplayName(me, clean)
+            val edits = about.edits(ProfileAbout(old))
+            if (edits.isNotEmpty()) account.client.applyProfileEdits(me, edits, account.client.profileFieldsAPI())
+            true
+        } catch (e: Exception) {
+            log("профиль не сохранён: $e")
+            false
+        }
     }
 
     /** Домен своей учётки: через него входим в комнаты сервера. */

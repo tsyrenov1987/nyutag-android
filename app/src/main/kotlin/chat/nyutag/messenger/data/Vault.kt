@@ -35,7 +35,14 @@ class KeystoreVault(context: Context) : SessionVault {
 
     override fun save(session: Session) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key())
+        // Испорченный ключ Keystore (бывает после смены блокировки на части прошивок) не должен навсегда закрыть вход:
+        // прежняя сессия им всё равно не читается, так что ключ заводим заново.
+        try {
+            cipher.init(Cipher.ENCRYPT_MODE, key())
+        } catch (e: java.security.GeneralSecurityException) {
+            KeyStore.getInstance(KEYSTORE).apply { load(null) }.deleteEntry(ALIAS)
+            cipher.init(Cipher.ENCRYPT_MODE, key())
+        }
         val sealed = cipher.doFinal(session.toJson().compact().toByteArray(Charsets.UTF_8))
         prefs.edit()
             .putString(IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))

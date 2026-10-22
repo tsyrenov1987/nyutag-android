@@ -95,6 +95,29 @@ class AuthTest {
         }
     }
 
+    /** Сессия пропала (Keystore потерял ключ), база осталась: новый вход не берёт чужие для нового устройства ключи. */
+    @Test fun signInAfterLostSessionStartsClean() = runBlocking {
+        val server = FakeHomeserver()
+        server.setPassword("секрет", user)
+        val vault = MemorySessionVault()
+        val root: File = Files.createTempDirectory("nyutag-shelf").toFile()
+        val shelf = Shelf(root) { JdbcSql.open(it) }
+        try {
+            val keeper = AccountKeeper(vault, shelf) { _, token -> server.client(token) }
+            val first = keeper.signIn(server.homeserver, "dorzho", "секрет", "Xiaomi")
+            first.store.setMeta("probe", "старое устройство")
+            first.store.close()
+            vault.erase()
+            assertNull(keeper.restore())
+
+            val second = keeper.signIn(server.homeserver, "dorzho", "секрет", "Xiaomi")
+            assertNull(second.store.meta("probe"))
+            second.store.close()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun usernameAvailability() = runBlocking {
         val server = FakeHomeserver()
         server.setPassword("секрет", user)

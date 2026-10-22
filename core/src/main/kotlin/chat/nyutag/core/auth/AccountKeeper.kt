@@ -60,10 +60,12 @@ class AccountKeeper(
     private val makeClient: (homeserver: URI, accessToken: String?) -> MatrixClient,
 ) {
     /** Вход по паролю. Сессия сохраняется до открытия базы: если база не откроется, повторный запуск поднимет
-     *  уже выданное устройство, а не заведёт новое. */
+     *  уже выданное устройство, а не заведёт новое. Вход — всегда новое устройство: база, оставшаяся от прежнего
+     *  (сессию стёрли или Keystore потерял ключ), стирается, иначе старые ключи Olm встали бы под новым ID. */
     suspend fun signIn(homeserver: URI, user: String, password: String, deviceName: String): SignedInAccount {
         val client = makeClient(homeserver, null)
         val session = client.login(user, password, deviceDisplayName = deviceName)
+        shelf.wipe(session.userID)
         vault.save(session)
         return SignedInAccount(session, client, shelf.openStore(session.userID))
     }

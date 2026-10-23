@@ -78,20 +78,21 @@ class Store(val db: Sql) : AutoCloseable {
         )
     }
 
-    /** Совпадения по свёрнутому тексту, новые первыми; удалённые реплики не показываем. */
+    /** Совпадения по свёрнутому тексту, новые первыми; удалённые реплики не показываем.
+     *  Удалённые отсекаются здесь, а не в SQL: в SQLite части телефонов Android нет `json_extract`. */
     fun searchText(folded: String, roomID: String?, limit: Int): List<SearchHit> = synchronized(lock) {
+        val removed = db.query("SELECT * FROM events WHERE type = ?", SqlValue.of(EventType.REDACTION), row = ::event)
+            .mapNotNullTo(HashSet()) { it.content["redacts"]?.string }
         db.query(
             """
             SELECT event_id, room_id, sender, ts, text FROM search_text
             WHERE instr(folded, ?) > 0 AND (? IS NULL OR room_id = ?)
-              AND event_id NOT IN (SELECT json_extract(content, '$.redacts') FROM events
-                                   WHERE type = ? AND json_extract(content, '$.redacts') IS NOT NULL)
             ORDER BY ts DESC LIMIT ?
             """.trimIndent(),
-            SqlValue.of(folded), SqlValue.of(roomID), SqlValue.of(roomID), SqlValue.of(EventType.REDACTION), SqlValue.of(limit),
+            SqlValue.of(folded), SqlValue.of(roomID), SqlValue.of(roomID), SqlValue.of(limit + removed.size),
         ) { row ->
             SearchHit(row.string(0) ?: "", row.string(1) ?: "", row.string(2) ?: "", row.long(3) ?: 0, row.string(4) ?: "")
-        }
+        }.filter { it.eventID !in removed }.take(limit)
     }
 
     fun eventCount(): Int = synchronized(lock) { db.scalar("SELECT COUNT(*) FROM events")?.int ?: 0 }

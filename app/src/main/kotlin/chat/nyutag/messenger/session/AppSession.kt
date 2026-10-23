@@ -54,6 +54,13 @@ import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
 import chat.nyutag.core.rooms.Forwarding
 import chat.nyutag.core.rooms.IgnoredUsers
+import chat.nyutag.core.rooms.AutoDelete
+import chat.nyutag.core.rooms.ChatLayout
+import chat.nyutag.core.rooms.Search
+import chat.nyutag.core.rooms.invite
+import chat.nyutag.core.rooms.save
+import chat.nyutag.core.rooms.setRoomMuted
+import chat.nyutag.core.store.SearchHit
 import chat.nyutag.core.rooms.MutedRooms
 import chat.nyutag.core.rooms.CreateRoom
 import chat.nyutag.core.rooms.People
@@ -185,9 +192,23 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private val avatarMemory = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
-    private var ignored: Set<String> = emptySet()
-    var muted: Set<String> = emptySet()
-        private set
+    private val blockedFlow = MutableStateFlow<Set<String>>(emptySet())
+    /** Заблокированные: их реплики спрятаны, сервер их не присылает. */
+    val blocked: StateFlow<Set<String>> get() = blockedFlow
+    private var ignored: Set<String>
+        get() = blockedFlow.value
+        set(value) { blockedFlow.value = value }
+    private val mutedFlow = MutableStateFlow<Set<String>>(emptySet())
+    /** Чаты без звука: пуши о них не показываем, в списке — перечёркнутый колокольчик. */
+    val mutedRooms: StateFlow<Set<String>> get() = mutedFlow
+    val muted: Set<String> get() = mutedFlow.value
+    private val layoutFlow = MutableStateFlow(ChatLayout())
+    /** Закреплённые чаты и папки; общий формат с iOS, живёт в данных аккаунта. */
+    val layout: StateFlow<ChatLayout> get() = layoutFlow
+    /** Идёт запись раскладки: /sync до её конца принёс бы старую и откатил галочку. */
+    private val layoutWrites = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var indexing = false
+    @Volatile private var indexedCount = -1
 
     /** Флаги без секретов: карточка «старые сообщения закрыты» должна пережить перезапуск. */
     private val flags = context.getSharedPreferences("nyutag.history", Context.MODE_PRIVATE)
@@ -320,6 +341,10 @@ class AppSession(context: Context, private val doors: DoorHub) {
         autoJoined.clear()
         linesFlow.value = emptyList()
         communitiesFlow.value = emptyList()
+        blockedFlow.value = emptySet()
+        mutedFlow.value = emptySet()
+        layoutFlow.value = ChatLayout()
+        indexedCount = -1
         catalog = emptyList()
         typingFlow.value = emptyMap()
         historyFlow.value = null
@@ -373,6 +398,7 @@ class AppSession(context: Context, private val doors: DoorHub) {
                 noteTyping(update.response)
                 refresh()
                 revisionFlow.value += 1
+                scope.launch { indexSearch() }
             }
         }
         engine.start()
@@ -546,7 +572,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val me = me ?: return@withLock
         withContext(Dispatchers.IO) {
             runCatching { IgnoredUsers.load(account.store) }.getOrNull()?.let { ignored = it }
-            runCatching { MutedRooms.load(account.store) }.getOrNull()?.let { muted = it }
+            runCatching { MutedRooms.load(account.store) }.getOrNull()?.let { if (it != mutedFlow.value) mutedFlow.value = it }
+            if (layoutWrites.get() == 0) runCatching { ChatLayout.load(account.store) }.getOrNull()?.let { if (it != layoutFlow.value) layoutFlow.value = it }
             runCatching { ChatDigest.lines(account.store, me, ignored, ::open) }.getOrNull()?.let { fresh ->
                 val chats = fresh.filter { !it.isSpace }
                 val spaces = fresh.filter { it.isSpace && it.membership == RoomRecord.Membership.JOIN }
@@ -756,6 +783,151 @@ class AppSession(context: Context, private val doors: DoorHub) {
         refresh()
         revisionFlow.value += 1
         return true
+    }
+
+    fun isBlocked(userID: String): Boolean = userID in ignored
+
+    // MARK: Раскладка списка
+
+    fun setPinned(roomID: String, pinned: Boolean) = change { it.pinning(roomID, pinned) }
+
+    /** Новая папка; `with` — чат, из меню которого её завели, сразу в ней. */
+    fun addFolder(name: String, with: String? = null) = change { it.addingFolder(name = name, with = with) }
+
+    fun renameFolder(id: String, to: String) = change { it.renamingFolder(id, to) }
+
+    fun deleteFolder(id: String) = change { it.removingFolder(id) }
+
+    fun place(roomID: String, folderID: String, inside: Boolean) = change { it.placing(roomID, folderID, inside) }
+
+    /** Сразу на экране, следом на сервер; сервер не принял — возвращаем как было. */
+    private fun change(edit: (ChatLayout) -> ChatLayout) {
+        val account = account ?: return
+        val me = me ?: return
+        val old = layoutFlow.value
+        val new = edit(old)
+        if (new == old) return
+        layoutFlow.value = new
+        layoutWrites.incrementAndGet()
+        scope.launch {
+            val ok = runCatching { account.client.save(new, me, account.store) }.onFailure { log("раскладка не сохранилась: $it") }.isSuccess
+            layoutWrites.decrementAndGet()
+            if (!ok) layoutFlow.compareAndSet(new, old)
+        }
+    }
+
+    // MARK: Звук, выход, участники
+
+    suspend fun setMuted(roomID: String, quiet: Boolean): Boolean {
+        val account = account ?: return false
+        val ok = runCatching { account.client.setRoomMuted(roomID, quiet, account.store) }.onFailure { log("звук не переключился: $it") }.isSuccess
+        if (ok) mutedFlow.value = if (quiet) mutedFlow.value + roomID else mutedFlow.value - roomID
+        return ok
+    }
+
+    /** Покинуть чат и забыть его: из списка уходит сразу и на всех устройствах. */
+    suspend fun leaveChat(roomID: String): Boolean {
+        val engine = engine ?: return false
+        val ok = runCatching { engine.leave(roomID, forget = true) }.onFailure { log("выход не прошёл: $it") }.isSuccess
+        if (ok) {
+            if (layoutFlow.value.isPinned(roomID)) setPinned(roomID, false)
+            refresh()
+            revisionFlow.value += 1
+        }
+        return ok
+    }
+
+    /** Новая шифрованная группа с выбранными людьми. Возвращает id. */
+    suspend fun createChat(name: String, members: List<String>): String? {
+        val account = account ?: return null
+        val roomID = runCatching { account.client.createRoom(CreateRoom(name = name.trim(), invite = members)) }
+            .onFailure { log("группа не создана: $it") }.getOrNull() ?: return null
+        log("группа создана, позвано ${members.size}")
+        refresh()
+        return roomID
+    }
+
+    /** С кем есть общие чаты: из них зовут в группу. */
+    suspend fun acquaintances(): List<Person> {
+        val account = account ?: return emptyList()
+        val me = me ?: return emptyList()
+        return withContext(Dispatchers.IO) {
+            runCatching { People.acquaintances(account.store, me) }.getOrDefault(emptyList()).filter { it.userID !in ignored }
+        }
+    }
+
+    suspend fun members(roomID: String): List<Person> {
+        val account = account ?: return emptyList()
+        val me = me ?: return emptyList()
+        return withContext(Dispatchers.IO) { runCatching { People.members(roomID, account.store, me) }.getOrDefault(emptyList()) }
+    }
+
+    /** Собеседник личного чата. */
+    suspend fun partner(roomID: String): String? {
+        val account = account ?: return null
+        val me = me ?: return null
+        return withContext(Dispatchers.IO) { runCatching { People.partner(roomID, account.store, me) }.getOrNull() }
+    }
+
+    /** Позвать людей в группу; `false` — хоть одного сервер не принял. */
+    suspend fun invite(users: List<String>, roomID: String): Boolean {
+        val account = account ?: return false
+        var ok = true
+        for (user in users) {
+            if (runCatching { account.client.invite(roomID, user) }.onFailure { log("приглашение в группу не прошло: $it") }.isFailure) ok = false
+        }
+        return ok
+    }
+
+    // MARK: Автоудаление
+
+    suspend fun autoDelete(roomID: String): AutoDelete {
+        val account = account ?: return AutoDelete()
+        return withContext(Dispatchers.IO) { runCatching { AutoDelete.load(roomID, account.store) }.getOrDefault(AutoDelete()) }
+    }
+
+    /** Новый таймер с этого момента; `null` — сервер не принял (например, не хватает прав в группе). */
+    suspend fun setAutoDelete(ttl: Int, roomID: String): AutoDelete? {
+        val account = account ?: return null
+        val rule = AutoDelete.starting(ttl)
+        return runCatching { account.client.setState(roomID, EventType.AUTODELETE, content = rule.json); rule }
+            .onFailure { log("таймер не сменился: $it") }.getOrNull()
+    }
+
+    // MARK: Поиск
+
+    /** Реплика, к которой открыть чат (из поиска): чат забирает её при открытии. */
+    @Volatile private var focus: Pair<String, String>? = null
+
+    fun focus(roomID: String, eventID: String) { focus = roomID to eventID }
+
+    fun takeFocus(roomID: String): String? = focus?.takeIf { it.first == roomID }?.second.also { focus = null }
+
+    /** Реплики по запросу, только из чатов списка. */
+    suspend fun search(query: String, roomID: String? = null): List<SearchHit> {
+        val account = account ?: return emptyList()
+        val known = linesFlow.value.mapTo(HashSet()) { it.id }
+        return withContext(Dispatchers.IO) {
+            runCatching { Search.find(query, roomID, account.store, 80) }.getOrDefault(emptyList()).filter { it.roomID in known }
+        }
+    }
+
+    /** Фоновый проход индекса: только когда в базе прибавились события и предыдущий проход закончен. */
+    private suspend fun indexSearch() {
+        val account = account ?: return
+        if (indexing) return
+        indexing = true
+        try {
+            withContext(Dispatchers.IO) {
+                val count = runCatching { account.store.eventCount() }.getOrDefault(0)
+                if (count == indexedCount) return@withContext
+                val added = runCatching { Search.index(account.store, ::open) }.getOrDefault(0)
+                indexedCount = count
+                if (added > 0) log("поиск: в индекс легло $added")
+            }
+        } finally {
+            indexing = false
+        }
     }
 
     /** Событие в комнату; в шифрованную — через машину. */

@@ -65,6 +65,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import chat.nyutag.core.rooms.AutoDelete
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
 import chat.nyutag.core.rooms.TransactionID
@@ -163,6 +164,9 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var listed by remember(roomID) { mutableStateOf(false) }
     LaunchedEffect(line != null) { if (line != null) listed = true else if (listed) onBack() }
     var limit by remember(roomID) { mutableStateOf(60) }
+    // Открыли из поиска: к какой реплике прокрутить и какую коротко подсветить.
+    var focus by remember(roomID) { mutableStateOf(session.takeFocus(roomID)) }
+    var flash by remember(roomID) { mutableStateOf<String?>(null) }
     var items by remember(roomID) { mutableStateOf<List<FeedItem>>(emptyList()) }
     val outbox = remember(roomID) { mutableStateListOf<Outgoing>() }
     var draft by remember(roomID) { mutableStateOf(TextFieldValue()) }
@@ -179,6 +183,17 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     var reporting by remember(roomID) { mutableStateOf<FeedItem?>(null) }
     var reportSent by remember(roomID) { mutableStateOf(false) }
     var choosingWallpaper by remember(roomID) { mutableStateOf(false) }
+    var showingInfo by remember(roomID) { mutableStateOf(false) }
+    var showingPartner by remember(roomID) { mutableStateOf<String?>(null) }
+    var askLeave by remember(roomID) { mutableStateOf(false) }
+    var choosingRule by remember(roomID) { mutableStateOf(false) }
+    var rule by remember(roomID) { mutableStateOf(AutoDelete()) }
+    var settingRule by remember(roomID) { mutableStateOf<AutoDelete?>(null) }
+    var expiryTick by remember(roomID) { mutableStateOf(0) }
+    val tidied = remember(roomID) { HashSet<String>() }
+    val mutedRooms by session.mutedRooms.collectAsState()
+    val partner by produceState<String?>(null, roomID, line?.isDirect) { value = if (line?.isDirect == true) session.partner(roomID) else null }
+    val isSaved = remember(roomID) { session.savedRoomID == roomID }
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val mic = rememberMicAccess()
@@ -199,9 +214,21 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     // Звонить можно один на один и в шифрованную группу; состав комнаты меняется синхронизацией.
     val callKind by produceState(AppSession.CallKind.NONE, roomID, revision) { value = session.callKind(roomID) }
 
-    LaunchedEffect(roomID, revision, limit) {
-        val fresh = session.feed(roomID, limit)
+    LaunchedEffect(roomID, revision, limit, expiryTick, settingRule) {
+        val stored = session.autoDelete(roomID)
+        if (stored == settingRule) settingRule = null
+        val current = settingRule ?: stored
+        if (current != rule) rule = current
+        val all = session.feed(roomID, limit)
+        val fresh = current.visible(all)
         items = fresh
+        // Свои истёкшие реплики автор удаляет и на сервере; чужие просто не показываем.
+        val expired = current.ownToDelete(all).filter { it !in tidied }
+        if (expired.isNotEmpty()) {
+            tidied.addAll(expired)
+            for (id in expired) session.delete(roomID, id)
+            if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "автоудаление убрало свои ${expired.size}")
+        }
         val arrived = fresh.mapTo(HashSet()) { it.id }
         outbox.removeAll { it.eventID != null && it.eventID in arrived }
         // Прочитано всё, что видно: отметка на последнем чужом событии (сигналы звонка сервер тоже считает),
@@ -212,6 +239,13 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                 session.markRead(roomID, id)
             }
         }
+    }
+
+    // Следующая реплика истечёт — перечитать ленту, чтобы она пропала и без новых событий.
+    LaunchedEffect(rule, items) {
+        val next = rule.nextExpiry(items) ?: return@LaunchedEffect
+        delay((next - System.currentTimeMillis()).coerceAtLeast(500))
+        expiryTick += 1
     }
 
     LaunchedEffect(roomID, typingAll) {
@@ -422,12 +456,29 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
         WallpaperPicker(roomID) { choosingWallpaper = false }
         return
     }
+    if (showingInfo) {
+        GroupInfoScreen(session, roomID, onClose = { showingInfo = false }, onLeft = { showingInfo = false; onBack() })
+        return
+    }
+    showingPartner?.let { userID ->
+        PersonScreen(session, userID) { showingPartner = null }
+        return
+    }
     reporting?.let { item ->
         ReportScreen(session, item, roomID, onClose = { reporting = null }) { reporting = null; reportSent = true }
         return
     }
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding().imePadding()) {
         Header(line, typingLine, onBack, onWallpaper = { choosingWallpaper = true },
+               menu = ChatMenu(
+                   onPartner = partner?.let { { showingPartner = it } },
+                   onInfo = if (line?.isDirect == false && !isSaved) ({ showingInfo = true }) else null,
+                   ruleName = if (rule.isOn) ruleName(rule.choice, words) else null,
+                   onRule = { choosingRule = true },
+                   muted = if (isSaved) null else roomID in mutedRooms,
+                   onMute = { quiet -> scope.launch { if (!session.setMuted(roomID, quiet)) notice = words(P.cantDo) } },
+                   onLeave = if (isSaved) null else ({ askLeave = true }),
+               ),
                onCall = if (callKind == AppSession.CallKind.NONE) null else ({
                    mic.ask { granted ->
                        if (granted) scope.launch { session.startCall(roomID) }
@@ -449,19 +500,39 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
         val newest = rows.lastOrNull()
         LaunchedEffect(newest?.key) {
             val mine = (newest as? Row.Bubble)?.mine == true
-            if (newest != null && (mine || listState.firstVisibleItemIndex <= 2)) listState.animateScrollToItem(0)
+            if (newest != null && focus == null && (mine || listState.firstVisibleItemIndex <= 2)) listState.animateScrollToItem(0)
         }
+        // Найденной реплики нет в окне — сначала шире окно из базы, потом страницы с сервера; нашлась — к ней.
+        LaunchedEffect(rows, focus) {
+            val wanted = focus ?: return@LaunchedEffect
+            if (items.isEmpty() || loadingOlder) return@LaunchedEffect
+            val index = rows.asReversed().indexOfFirst { it.key == wanted }
+            when {
+                index >= 0 -> { listState.scrollToItem(index); focus = null; flash = wanted }
+                items.size >= limit -> limit += 120
+                !noMoreHistory -> {
+                    loadingOlder = true
+                    if (session.loadOlder(roomID)) limit += 60 else noMoreHistory = true
+                    loadingOlder = false
+                }
+                else -> focus = null
+            }
+        }
+        LaunchedEffect(flash) { if (flash != null) { delay(1600); flash = null } }
         Box(Modifier.weight(1f).fillMaxWidth()) {
         WallpaperBackground(roomID, Modifier.matchParentSize())
         LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true,
                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
             items(rows.asReversed(), key = { it.key }) { row ->
+                Box(if (row.key == flash) Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(palette.sky.copy(alpha = 0.18f))
+                    else Modifier) {
                 when (row) {
                     is Row.Plate -> Plate(row.text)
                     is Row.Bubble -> Bubble(session, row, busy = row.item != null && row.item.id == openingID,
                                             seen = row.item != null && row.item.id in seenOnce, onRetry = {
                         row.retry?.let { (tx, text) -> send(text, tx, retry = outbox.firstOrNull { it.transactionID == tx }) }
                     }, onOpen = { row.item?.let(::open) }, onAction = { action -> row.item?.let { act(action, it) } })
+                }
                 }
             }
         }
@@ -544,6 +615,30 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                     },
                     dismissButton = { TextButton({ deleting = null }) { Text(words(P.cancel), color = palette.sky) } })
     }
+    if (askLeave) LeaveDialog(session, roomID, onDismiss = { askLeave = false }, onFailed = { notice = words(P.chatLeaveFailed) }, onLeft = onBack)
+    if (choosingRule) {
+        AlertDialog(onDismissRequest = { choosingRule = false }, containerColor = palette.card,
+                    title = { Text(words(P.autoDelete), color = palette.ink, fontSize = 17.sp) },
+                    text = {
+                        Column {
+                            Text(words(P.autoDeleteHint), color = palette.quiet, fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
+                            for (ttl in AutoDelete.choices) {
+                                Row(Modifier.fillMaxWidth().clickable {
+                                    choosingRule = false
+                                    if (ttl != rule.choice) scope.launch {
+                                        val fresh = session.setAutoDelete(ttl, roomID)
+                                        if (fresh == null) notice = words(P.autoDeleteError) else { settingRule = fresh; rule = fresh }
+                                        if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "автоудаление ${fresh?.ttl ?: "не сменилось"}")
+                                    }
+                                }.padding(vertical = 12.dp)) {
+                                    Text(ruleName(ttl, words), color = palette.ink, fontSize = 17.sp, modifier = Modifier.weight(1f))
+                                    if (ttl == rule.choice) Text("✓", color = palette.sky, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = { TextButton({ choosingRule = false }) { Text(words(P.cancel), color = palette.sky) } })
+    }
     if (reportSent) {
         AlertDialog(onDismissRequest = { reportSent = false }, title = { Text(words(P.reportSent)) },
                     confirmButton = { TextButton({ reportSent = false }) { Text(words(P.done), color = palette.sky) } })
@@ -554,12 +649,30 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     }
 }
 
+/** Что есть в меню «⋯» чата; `null` — пункта нет. */
+private class ChatMenu(
+    val onPartner: (() -> Unit)?,
+    val onInfo: (() -> Unit)?,
+    val ruleName: String?,
+    val onRule: () -> Unit,
+    val muted: Boolean?,
+    val onMute: (Boolean) -> Unit,
+    val onLeave: (() -> Unit)?,
+)
+
+private fun ruleName(ttl: Int, words: Words): String = when (ttl) {
+    0 -> words(P.autoDeleteOff)
+    AutoDelete.DAY -> words(P.autoDeleteDay)
+    AutoDelete.WEEK -> words(P.autoDeleteWeek)
+    else -> words(P.autoDeleteMonth)
+}
+
 @Composable
-private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit, onCall: (() -> Unit)?,
+private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallpaper: () -> Unit, menu: ChatMenu, onCall: (() -> Unit)?,
                    onVideoCall: (() -> Unit)?) {
     val words = LocalWords.current
     val palette = LocalPalette.current
-    var menu by remember { mutableStateOf(false) }
+    var open by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().background(palette.card).padding(horizontal = 4.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("‹", color = palette.sky, fontSize = 34.sp,
@@ -578,9 +691,24 @@ private fun Header(line: ChatLine?, typing: String?, onBack: () -> Unit, onWallp
         if (onVideoCall != null) VideoCallButton(palette.sky, onClick = onVideoCall)
         Box {
             Text("⋯", color = palette.sky, fontSize = 26.sp,
-                 modifier = Modifier.clip(CircleShape).clickable { menu = true }.padding(horizontal = 12.dp, vertical = 2.dp))
-            DropdownMenu(menu, { menu = false }) {
-                DropdownMenuItem({ Text(words(P.wallpaperForChat)) }, { menu = false; onWallpaper() })
+                 modifier = Modifier.clip(CircleShape).clickable { open = true }.padding(horizontal = 12.dp, vertical = 2.dp))
+            DropdownMenu(open, { open = false }) {
+                menu.onPartner?.let { action -> DropdownMenuItem({ Text(words(P.profile)) }, { open = false; action() }) }
+                menu.onInfo?.let { action -> DropdownMenuItem({ Text(words(P.groupInfo)) }, { open = false; action() }) }
+                DropdownMenuItem({ Text(words(P.wallpaperForChat)) }, { open = false; onWallpaper() })
+                DropdownMenuItem({
+                    Column {
+                        Text(words(P.autoDelete))
+                        Text(menu.ruleName ?: words(P.autoDeleteOff), color = palette.quiet, fontSize = 13.sp)
+                    }
+                }, { open = false; menu.onRule() })
+                menu.muted?.let { muted ->
+                    DropdownMenuItem({ Text(words(if (muted) P.unmute else P.mute)) }, { open = false; menu.onMute(!muted) })
+                }
+                menu.onLeave?.let { action ->
+                    HorizontalDivider(color = palette.plate)
+                    DropdownMenuItem({ Text(words(P.chatLeave), color = Danger) }, { open = false; action() })
+                }
             }
         }
     }

@@ -46,6 +46,7 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     val palette = LocalPalette.current
     var inviting by rememberSaveable { mutableStateOf(false) }
     var founding by rememberSaveable { mutableStateOf(false) }
+    var grouping by rememberSaveable { mutableStateOf(false) }
     var meOpen by rememberSaveable { mutableStateOf(false) }
     // В отладочной сборке окно ключа открывается и по extra ui_history_key: проверка неверным ключом на любом аккаунте.
     val activity = LocalContext.current as? Activity
@@ -62,6 +63,10 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
         MeScreen(session, onClose = { meOpen = false }, onOpen = onOpen, onInvite = { inviting = true })
         return
     }
+    if (grouping) {
+        GroupCreateScreen(session, onClose = { grouping = false }) { grouping = false; onOpen(it) }
+        return
+    }
     if (founding) {
         NewCommunityScreen(session, onClose = { founding = false }) { founding = false; onCommunity(it) }
         return
@@ -73,7 +78,7 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding()) {
         Box(Modifier.weight(1f)) {
             when (tab) {
-                0 -> ChatListScreen(session, onOpen, onMe = { meOpen = true }, onHistoryKey = { keyOpen = true })
+                0 -> ChatListScreen(session, onOpen, onMe = { meOpen = true }, onHistoryKey = { keyOpen = true }, onNewGroup = { grouping = true })
                 1 -> ContactsScreen(session, onOpen, onInvite = { inviting = true })
                 2 -> CommunitiesScreen(session, onCommunity = { onCommunity(it) }, onNew = { founding = true })
                 else -> CalendarScreen()

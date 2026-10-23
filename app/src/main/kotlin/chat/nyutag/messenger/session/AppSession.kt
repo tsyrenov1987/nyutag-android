@@ -220,7 +220,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
     fun launch() {
         if (phaseFlow.value != Phase.LAUNCHING) return
         scope.launch {
+            val began = System.currentTimeMillis()
             val restored = withContext(Dispatchers.IO) { runCatching { keeper.restore() }.getOrNull() }
+            log("запуск: вход поднят за ${System.currentTimeMillis() - began} мс")
             if (restored == null) phaseFlow.value = Phase.SIGNED_OUT else start(restored, password = null)
         }
     }
@@ -336,11 +338,16 @@ class AppSession(context: Context, private val doors: DoorHub) {
         this.engine = engine
         cryptoReady = CompletableDeferred()
         phaseFlow.value = Phase.SIGNED_IN
+        val began = System.currentTimeMillis()
         refresh()
+        log("запуск: список за ${System.currentTimeMillis() - began} мс")
         try {
             val machine = CryptoMachine.create(account.client, account.store, account.session)
             this.machine = machine
             engine.addObserver(machine)
+            // Расшифровка своя, без сети: список с текстом вместо «Новое сообщение» — до публикации ключей.
+            refresh()
+            log("запуск: машина и расшифрованный список за ${System.currentTimeMillis() - began} мс")
             runCatching { machine.publishKeys(null) }
             if (password != null) {
                 // Пароль уже проверен сервером: им же запираем или открываем хранилище ключей.
@@ -775,6 +782,16 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val account = account ?: return
         val me = me ?: return
         runCatching { account.client.setTyping(roomID, me, typing) }
+    }
+
+    /** Последнее событие комнаты любого вида, если оно чужое: отметка на нём обнуляет счёт сервера,
+     *  в том числе за шифрованные сигналы звонка, которых нет в ленте. */
+    suspend fun lastForeignEvent(roomID: String): String? {
+        val account = account ?: return null
+        val me = me ?: return null
+        return withContext(Dispatchers.IO) {
+            runCatching { account.store.events(roomID, 1).lastOrNull()?.takeIf { it.sender != me }?.eventID }.getOrNull()
+        }
     }
 
     /** Отметка прочтения: публичная, чтобы у собеседника загорелись две галочки. */

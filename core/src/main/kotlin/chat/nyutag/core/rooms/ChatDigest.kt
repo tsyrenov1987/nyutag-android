@@ -83,7 +83,17 @@ object ChatDigest {
         // Идём от новых к старым: удаления и правки встречаются раньше реплик, к которым относятся.
         val removed = HashSet<String>()
         val edits = HashMap<String, Event>()
+        // Непрочитанное считаем сами: сервер не отличает шифрованные сигналы звонка от реплик и считает их тоже.
+        // Видимые чужие реплики после своей отметки прочтения или своей реплики.
+        val readID = store.receipt(record.id, me)
+        val readTS = readID?.let { store.event(it) }?.originServerTS
+        var counted = 0
+        var reachedRead = record.notificationCount == 0
         for (event in store.events(record.id, LOOKBACK).asReversed()) {
+            // Дошли до создания комнаты — вся история перед глазами, счёт точный.
+            if (event.type == EventType.CREATE) reachedRead = true
+            if (!reachedRead && (event.eventID == readID || (readTS != null && (event.originServerTS ?: 0) <= readTS))) reachedRead = true
+            if (lastEvent != null && reachedRead) break
             if (event.type == EventType.REDACTION) {
                 val target = event.content["redacts"]?.string ?: event.unsigned?.get("redacts")?.string
                 if (target != null) removed.add(target)
@@ -121,10 +131,14 @@ object ChatDigest {
             if (kind == PushPreview.Kind.Other || kind == PushPreview.Kind.Signal) continue
             // Своё старое приглашение в чате, куда уже вошли, — не реплика.
             if (kind == PushPreview.Kind.Invite && record.membership != RoomRecord.Membership.INVITE) continue
-            last = kind
-            lastEvent = shown
-            break
+            if (lastEvent == null) {
+                last = kind
+                lastEvent = shown
+            }
+            if (shown.sender == me) reachedRead = true
+            if (!reachedRead) counted++
         }
+        val unread = if (reachedRead) minOf(counted, record.notificationCount) else record.notificationCount
 
         val title: String
         val roomName = record.name
@@ -157,7 +171,7 @@ object ChatDigest {
             isDirect = record.isDirect, isEncrypted = record.isEncrypted, isSpace = record.isSpace,
             last = last, lastSenderName = sender?.let { name(it) }, lastIsMine = sender == me, delivery = delivery,
             lastTS = lastEvent?.originServerTS ?: record.latestTS,
-            unread = record.notificationCount, mentions = record.highlightCount,
+            unread = unread, mentions = record.highlightCount,
         )
     }
 

@@ -204,8 +204,9 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
         items = fresh
         val arrived = fresh.mapTo(HashSet()) { it.id }
         outbox.removeAll { it.eventID != null && it.eventID in arrived }
-        // Прочитано всё, что видно: отметка на последней чужой реплике.
-        fresh.lastOrNull { !it.isMine && !it.isNotice }?.id?.let { id ->
+        // Прочитано всё, что видно: отметка на последнем чужом событии (сигналы звонка сервер тоже считает),
+        // иначе на последней чужой реплике.
+        (session.lastForeignEvent(roomID) ?: fresh.lastOrNull { !it.isMine && !it.isNotice }?.id)?.let { id ->
             if (id != lastRead) {
                 lastRead = id
                 session.markRead(roomID, id)

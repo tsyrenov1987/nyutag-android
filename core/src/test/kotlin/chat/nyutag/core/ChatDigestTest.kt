@@ -105,6 +105,31 @@ class ChatDigestTest {
         assertEquals(PushPreview.Kind.Text("перезвоню"), ChatDigest.lines(store, me).first().last)
     }
 
+    @Test fun unreadSkipsCallSignals() = runBlocking {
+        val store = Store(JdbcSql.inMemory())
+        store.upsert(RoomRecord("!dm", RoomRecord.Membership.JOIN, notificationCount = 3))
+        store.setState(member(me, "!dm"))
+        store.setState(member(arjuna, "!dm"))
+        val ring = { id: String, ts: Long -> Event(eventID = id, type = "chat.nyutag.ring", sender = arjuna, originServerTS = ts, content = JsonValue.of("slot" to id), roomID = "!dm") }
+        store.append(listOf(text("\$1", "!dm", arjuna, 100, "сайн"), ring("\$r1", 200), ring("\$r2", 210)))
+        // Реплика прочитана, после неё только сигналы звонка — сервер насчитал 3, а читать нечего.
+        store.setReceipt("!dm", me, "\$1", 150)
+        assertEquals(0, ChatDigest.lines(store, me).first().unread)
+        // Новая чужая реплика после сигналов — одна непрочитанная.
+        store.append(listOf(text("\$2", "!dm", arjuna, 300, "алло")))
+        assertEquals(1, ChatDigest.lines(store, me).first().unread)
+        // Своя реплика после чужих — всё прочитано.
+        store.append(listOf(text("\$3", "!dm", me, 400, "да")))
+        assertEquals(0, ChatDigest.lines(store, me).first().unread)
+
+        // Отметки нет, но видна вся история с создания комнаты: в ней только звонок.
+        store.upsert(RoomRecord("!call", RoomRecord.Membership.JOIN, notificationCount = 1))
+        store.append(listOf(Event(eventID = "\$c", type = EventType.CREATE, sender = arjuna, stateKey = "", originServerTS = 10,
+                                  content = JsonValue.of("room_version" to "12"), roomID = "!call"),
+                            ring("\$r3", 20).copy(roomID = "!call")))
+        assertEquals(0, ChatDigest.lines(store, me).first { it.id == "!call" }.unread)
+    }
+
     @Test fun deliveryTicks() = runBlocking {
         val store = Store(JdbcSql.inMemory())
         pair(store)

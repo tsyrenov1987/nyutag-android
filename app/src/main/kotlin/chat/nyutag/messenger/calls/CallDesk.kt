@@ -26,6 +26,7 @@ import chat.nyutag.messenger.ui.P
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class CallDesk(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -141,7 +143,8 @@ class CallDesk(private val context: Context) {
         session.accept()
     }
 
-    suspend fun hangUp() {
+    /** Сигнал отбоя доотправляется, даже если экран звонка уже закрылся и отменил свою корутину. */
+    suspend fun hangUp() = withContext(NonCancellable) {
         hungUpHere = true
         currentFlow.value?.hangUp()
     }

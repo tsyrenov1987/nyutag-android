@@ -173,6 +173,16 @@ object People {
         .sortedWith(byName)
 }
 
+/** GET /v3/rooms/{id}/joined_members: кто сейчас в комнате (вместе с собой), по имени. Для сообществ:
+ *  их участников нет в нашем хранилище — пространство приходит без ленты. */
+suspend fun MatrixClient.joinedMembers(roomID: String): List<Person> {
+    val json = request(Method.GET, "rooms/$roomID/joined_members")
+    return (json["joined"]?.obj ?: emptyMap()).map { (userID, info) ->
+        val name = info["display_name"]?.string?.takeIf { it.isNotEmpty() } ?: ChatDigest.localpart(userID)
+        Person(userID, name, info["avatar_url"]?.string)
+    }.sortedWith(compareBy(People.names) { it.name })
+}
+
 /** POST /v3/user_directory/search: кого сервер покажет по имени или нику. */
 suspend fun MatrixClient.searchUsers(term: String, limit: Int = 20): List<Person> {
     val json = request(Method.POST, "user_directory/search", body = JsonValue.of("search_term" to term, "limit" to limit))

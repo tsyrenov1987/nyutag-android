@@ -257,7 +257,7 @@ private fun LazyListScope.header(title: String) {
 }
 
 @Composable
-fun PersonRow(person: Person, busy: Boolean = false, onClick: () -> Unit) {
+fun PersonRow(person: Person, busy: Boolean = false, note: String? = null, onClick: () -> Unit) {
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card).clickable(onClick = onClick).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -266,6 +266,7 @@ fun PersonRow(person: Person, busy: Boolean = false, onClick: () -> Unit) {
             Text(person.name, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("@" + ChatDigest.localpart(person.userID), color = palette.quiet, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        if (note != null) Text(note, color = palette.quiet, fontSize = 12.sp)
         if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
     }
 }

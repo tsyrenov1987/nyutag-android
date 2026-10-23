@@ -55,11 +55,13 @@ import chat.nyutag.core.rooms.TransactionID
 import chat.nyutag.core.rooms.backfill
 import chat.nyutag.core.rooms.addSpaceChild
 import chat.nyutag.core.rooms.createDirectRoom
+import chat.nyutag.core.rooms.creators
 import chat.nyutag.core.rooms.createRoom
 import chat.nyutag.core.rooms.deleteDevice
 import chat.nyutag.core.rooms.devices
 import chat.nyutag.core.rooms.event
 import chat.nyutag.core.rooms.join
+import chat.nyutag.core.rooms.joinedMembers
 import chat.nyutag.core.rooms.knock
 import chat.nyutag.core.rooms.leave
 import chat.nyutag.core.rooms.publicCommunities
@@ -879,7 +881,19 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val power = runCatching { account.client.state(spaceID, "m.room.power_levels") }.getOrNull()
         val mine = power?.get("users")?.get(me)?.int ?: power?.get("users_default")?.int ?: 0
         val needed = power?.get("events")?.get("m.space.child")?.int ?: power?.get("state_default")?.int ?: 50
-        return groups to (power != null && mine >= needed)
+        // Создатель комнаты 12-й версии может всё, хотя в power_levels его нет.
+        val creator = runCatching { account.client.creators(spaceID) }.getOrNull()?.contains(me) == true
+        return groups to (creator || (power != null && mine >= needed))
+    }
+
+    /** Участники сообщества (вместе с собой) и кто из них админ; `null` — не узнали. */
+    suspend fun communityPeople(spaceID: String): Pair<List<Person>, Set<String>>? {
+        val account = account ?: return null
+        val people = runCatching { account.client.joinedMembers(spaceID) }.getOrNull() ?: return null
+        val power = runCatching { account.client.state(spaceID, "m.room.power_levels") }.getOrNull()
+        val admins = runCatching { account.client.creators(spaceID) }.getOrDefault(emptySet()) +
+            power?.get("users")?.obj.orEmpty().filter { (it.value.int ?: 0) >= 100 }.keys
+        return people to admins
     }
 
     /** Открытое — вступаем сразу, закрытое (`knock`) — подаём заявку. */
@@ -907,8 +921,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
         return true
     }
 
-    /** Новое сообщество: пространство в каталоге сервера; закрытое пускает по заявке. Возвращает id. */
-    suspend fun createCommunity(name: String, about: String, open: Boolean): String? {
+    /** Новое сообщество: пространство в каталоге сервера; закрытое пускает по заявке. Сразу с общим чатом
+     *  `chatName`, чтобы вступившим было где писать. Возвращает id. */
+    suspend fun createCommunity(name: String, about: String, open: Boolean, chatName: String): String? {
         val account = account ?: return null
         val topic = about.trim().ifEmpty { null }
         val spaceID = runCatching {
@@ -917,6 +932,7 @@ class AppSession(context: Context, private val doors: DoorHub) {
         runCatching { account.client.setRoomVisibility(spaceID, public = true) }
         if (!open) runCatching { account.client.setState(spaceID, "m.room.join_rules", content = JsonValue.of("join_rule" to "knock")) }
         log("сообщество создано, ${if (open) "открытое" else "закрытое"}")
+        createGroup(chatName, spaceID)
         refresh()
         return spaceID
     }

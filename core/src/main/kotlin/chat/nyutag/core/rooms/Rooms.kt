@@ -92,6 +92,16 @@ suspend fun MatrixClient.setState(roomID: String, type: String, stateKey: String
 suspend fun MatrixClient.state(roomID: String, type: String, stateKey: String = ""): JsonValue =
     request(Method.GET, "rooms/$roomID/state/$type/$stateKey")
 
+/** Создатели комнаты: с версии 12 у них неограниченные права, а в `power_levels` их нет — это автор
+ *  `m.room.create` и `additional_creators`. В комнатах до 12-й права создателя записаны в `power_levels`: пусто. */
+suspend fun MatrixClient.creators(roomID: String): Set<String> {
+    val event = request(Method.GET, "rooms/$roomID/state/m.room.create/", query = mapOf("format" to "event"))
+    val version = event["content"]?.get("room_version")?.string ?: "1"
+    if ((version.toIntOrNull() ?: Int.MAX_VALUE) < 12) return emptySet()
+    val extra = event["content"]?.get("additional_creators")?.array.orEmpty().mapNotNull { it.string }
+    return (listOfNotNull(event["sender"]?.string) + extra).toSet()
+}
+
 // MARK: Членство
 
 data class CreateRoom(

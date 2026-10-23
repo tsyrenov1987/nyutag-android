@@ -5,6 +5,8 @@ package chat.nyutag.core
 import chat.nyutag.core.rooms.BookEntry
 import chat.nyutag.core.rooms.People
 import chat.nyutag.core.rooms.Person
+import chat.nyutag.core.rooms.creators
+import chat.nyutag.core.rooms.joinedMembers
 import chat.nyutag.core.store.RoomRecord
 import chat.nyutag.core.store.Store
 import chat.nyutag.core.sync.Event
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 
 class PeopleTest {
@@ -95,5 +98,27 @@ class PeopleTest {
         assertEquals(bair, People.partner("!b", store, me))
         assertNull(People.partner("!c", store, me))
         assertEquals(dulma, People.partner("!d", store, me))
+    }
+
+    @Test fun communityMembersByName() = runBlocking {
+        val transport = StubTransport()
+        transport.response = JsonValue.parse("""{"joined":{"@me:nyutag.chat":{"display_name":"Я"},
+            "@sayan:nyutag.chat":{"display_name":"Саян","avatar_url":"mxc://x/s"},"@bair:nyutag.chat":{}}}""")
+        val people = stubClient(transport).joinedMembers("!c:nyutag.chat")
+        assertEquals(3, people.size)
+        assertEquals(listOf("Саян", "Я", "bair"), people.map { it.name })
+        assertEquals("mxc://x/s", people[0].avatarURL)
+        assertEquals("/_matrix/client/v3/rooms/!c:nyutag.chat/joined_members", transport.last?.path)
+    }
+
+    @Test fun roomCreatorsByVersion() = runBlocking {
+        val transport = StubTransport()
+        transport.response = JsonValue.parse("""{"type":"m.room.create","sender":"@dulma:nyutag.chat",
+            "content":{"room_version":"12","additional_creators":["@bair:nyutag.chat"]}}""")
+        val client = stubClient(transport)
+        assertEquals(setOf("@dulma:nyutag.chat", "@bair:nyutag.chat"), client.creators("!c:nyutag.chat"))
+        assertEquals("format=event", transport.last?.url?.query)
+        transport.response = JsonValue.parse("""{"type":"m.room.create","sender":"@dulma:nyutag.chat","content":{"room_version":"11"}}""")
+        assertEquals(emptySet<String>(), client.creators("!c:nyutag.chat"))
     }
 }

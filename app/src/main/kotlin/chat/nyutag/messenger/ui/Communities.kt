@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import chat.nyutag.core.rooms.ChatLine
+import chat.nyutag.core.rooms.Person
 import chat.nyutag.core.rooms.PublicRoom
 import chat.nyutag.messenger.BuildConfig
 import chat.nyutag.messenger.session.AppSession
@@ -193,13 +194,18 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
     var leaving by remember { mutableStateOf(false) }
     var naming by remember { mutableStateOf(false) }
     var groupName by remember { mutableStateOf("") }
+    var people by remember { mutableStateOf<List<Person>?>(null) }
+    var admins by remember { mutableStateOf(emptySet<String>()) }
+    var allPeople by remember { mutableStateOf(false) }
+    var opening by remember { mutableStateOf<String?>(null) }
     BackHandler(onBack = onClose)
 
     LaunchedEffect(spaceID, joined) {
         val found = session.communityGroups(spaceID)
         groups = found?.first ?: groups ?: emptyList()
         canAdd = found?.second ?: false
-        if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "сообщество: ${if (joined) "участник" else "гость"}, групп ${groups?.size}, добавлять ${if (canAdd) "можно" else "нельзя"}")
+        if (joined) session.communityPeople(spaceID)?.let { people = it.first; admins = it.second }
+        if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "сообщество: ${if (joined) "участник" else "гость"}, групп ${groups?.size}, добавлять ${if (canAdd) "можно" else "нельзя"}, людей ${people?.size}")
     }
 
     fun act(block: suspend () -> Unit) {
@@ -208,6 +214,15 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
         scope.launch {
             try { block() } finally { busy = false }
         }
+    }
+
+    /** Общий чат — группа, где больше всего людей; если групп ещё нет, админ её создаёт. */
+    fun write() = act {
+        val general = groups?.maxByOrNull { it.numJoinedMembers }
+        val roomID = general?.roomID?.takeIf { session.joinGroup(it) }
+            ?: if (general == null && canAdd) session.createGroup(words(P.communityGeneralChat), spaceID)
+                ?.also { groups = session.communityGroups(spaceID)?.first ?: groups } else null
+        if (roomID != null) onOpen(roomID) else problem = true
     }
 
     FormPage(community.name, onClose) {
@@ -221,8 +236,11 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
                                       community.members?.let { words(P.communityMembers, it.toString()) })
             if (badge.isNotEmpty()) Text(badge.joinToString(" · "), color = palette.quiet, fontSize = 13.sp)
             if (joined) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 4.dp)) {
-                    Pill(words(P.communityInvite), palette.sky, androidx.compose.ui.graphics.Color.White) {
+                Box(Modifier.padding(top = 4.dp, start = 40.dp, end = 40.dp)) {
+                    BigButton(words(P.communityWrite), busy, enabled = !busy && (groups?.isNotEmpty() == true || canAdd)) { write() }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Pill(words(P.communityInvite), palette.plate, palette.sky) {
                         share(context, words(P.communityInviteText, community.name))
                     }
                     Pill(words(P.communityLeave), palette.plate, palette.quiet) { leaving = true }
@@ -244,6 +262,8 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
         }
         if (requested) FormCard { Text(words(P.communityRequested), color = palette.ink, fontSize = 15.sp, modifier = Modifier.padding(16.dp)) }
         if (problem) FailureNote(words(P.communityFailed))
+        if (!joined && !requested) Text(words(P.communityJoinToWrite), color = palette.quiet, fontSize = 13.sp,
+                                        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
         Text(words(P.communityGroups).uppercase(), color = palette.quiet, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
              modifier = Modifier.padding(start = 8.dp))
         FormCard {
@@ -252,7 +272,7 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
                 list == null -> Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                 list.isEmpty() -> Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(words(P.communityNoGroups), color = palette.ink, fontSize = 16.sp)
-                    Text(words(P.communityNoGroupsHint), color = palette.quiet, fontSize = 13.sp)
+                    Text(words(if (joined && canAdd) P.communityNoGroupsAdmin else P.communityNoGroupsHint), color = palette.quiet, fontSize = 13.sp)
                 }
                 else -> list.forEachIndexed { index, group ->
                     if (index > 0) FormDivider()
@@ -265,6 +285,7 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
                             Text(group.name ?: words(P.emptyChat), color = palette.ink, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(words(P.communityMembers, group.numJoinedMembers.toString()), color = palette.quiet, fontSize = 12.sp)
                         }
+                        if (joined) Text("›", color = palette.sky, fontSize = 22.sp)
                     }
                 }
             }
@@ -272,6 +293,29 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
                 if (!groups.isNullOrEmpty()) FormDivider()
                 Text("＋ " + words(P.communityGroupNew), color = palette.sky, fontSize = 16.sp,
                      modifier = Modifier.fillMaxWidth().clickable(enabled = !busy) { groupName = ""; naming = true }.padding(16.dp))
+            }
+        }
+        if (joined && !groups.isNullOrEmpty()) Text(words(P.communityGroupsHint), color = palette.quiet, fontSize = 13.sp,
+                                                    modifier = Modifier.padding(horizontal = 8.dp))
+        val list = people
+        if (joined && !list.isNullOrEmpty()) {
+            Text(words(P.communityPeople, list.size.toString()).uppercase(), color = palette.quiet, fontSize = 13.sp,
+                 fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 8.dp, top = 8.dp))
+            // Нажатие — личный чат с человеком; себя не открываем.
+            for (person in if (allPeople) list else list.take(8)) {
+                PersonRow(person, opening == person.userID, if (person.userID in admins) words(P.communityAdmin) else null) {
+                    if (person.userID == session.me || opening != null) return@PersonRow
+                    opening = person.userID
+                    scope.launch {
+                        val roomID = session.openDirect(person.userID)
+                        opening = null
+                        if (roomID != null) onOpen(roomID) else problem = true
+                    }
+                }
+            }
+            if (list.size > 8 && !allPeople) {
+                Text(words(P.communityShowAll), color = palette.sky, fontSize = 16.sp,
+                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).clickable { allPeople = true }.padding(16.dp))
             }
         }
     }
@@ -349,7 +393,7 @@ fun NewCommunityScreen(session: AppSession, onClose: () -> Unit, onCreated: (Str
         BigButton(words(P.communityCreate), busy, enabled = name.isNotBlank() && !busy) {
             busy = true
             scope.launch {
-                val id = session.createCommunity(name.trim(), about, open)
+                val id = session.createCommunity(name.trim(), about, open, words(P.communityGeneralChat))
                 busy = false
                 if (id == null) problem = true else onCreated(id)
             }

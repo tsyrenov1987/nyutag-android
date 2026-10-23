@@ -89,13 +89,16 @@ fun MeScreen(session: AppSession, onClose: () -> Unit, onOpen: (String) -> Unit,
     BackHandler(onBack = onClose)
     val me = session.me.orEmpty()
     val myAvatar by session.myAvatar.collectAsState()
+    // Имя из профиля; пока не загрузилось (или не задано) — логин.
+    var myName by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(me) { myName = session.profile(me)?.displayName?.trim()?.ifEmpty { null } }
     FormPage("", onClose, closeTitle = words(P.done)) {
         FormCard {
             Row(Modifier.fillMaxWidth().clickable { page = "profile" }.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Pillow(me, ChatDigest.localpart(me), 64.dp, myAvatar)
+                Pillow(me, myName ?: ChatDigest.localpart(me), 64.dp, myAvatar)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(ChatDigest.localpart(me), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text(myName ?: ChatDigest.localpart(me), color = palette.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     Text(me, color = palette.quiet, fontSize = 13.sp)
                 }
                 Text("›", color = palette.quiet, fontSize = 22.sp)

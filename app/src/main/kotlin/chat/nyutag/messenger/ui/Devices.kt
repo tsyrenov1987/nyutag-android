@@ -138,13 +138,17 @@ fun DevicesScreen(session: AppSession, onClose: () -> Unit) {
     }
 }
 
+private val PHONE_NAMES = listOf("Android", "iPhone", "iPad")
+
 @Composable
 private fun DeviceRow(device: AccountDevice, mine: Boolean, onClick: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        Canvas(Modifier.size(30.dp, 26.dp)) { if (mine) phone(palette.sky) else laptop(palette.quiet) }
+        // Телефоны узнаём по имени, которое ставят наши приложения («Нютаг Android», «Нютаг iPhone»).
+        val handheld = mine || PHONE_NAMES.any { device.displayName.orEmpty().contains(it, ignoreCase = true) }
+        Canvas(Modifier.size(30.dp, 26.dp)) { if (handheld) phone(if (mine) palette.sky else palette.quiet) else laptop(palette.quiet) }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(name(device, words), color = palette.ink, fontSize = 17.sp)
             if (mine) {

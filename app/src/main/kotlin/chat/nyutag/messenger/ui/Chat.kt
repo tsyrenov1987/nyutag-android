@@ -107,6 +107,9 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     val lines by session.lines.collectAsState()
     val typingAll by session.typing.collectAsState()
     val line = lines.firstOrNull { it.id == roomID }
+    // Чат был в списке и пропал — его покинули на другом устройстве: писать туда уже нельзя.
+    var listed by remember(roomID) { mutableStateOf(false) }
+    LaunchedEffect(line != null) { if (line != null) listed = true else if (listed) onBack() }
     var limit by remember(roomID) { mutableStateOf(60) }
     var items by remember(roomID) { mutableStateOf<List<FeedItem>>(emptyList()) }
     val outbox = remember(roomID) { mutableStateListOf<Outgoing>() }

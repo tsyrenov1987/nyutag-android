@@ -2,6 +2,7 @@ package chat.nyutag.core
 
 import chat.nyutag.core.auth.Session
 import chat.nyutag.core.net.MatrixClient
+import chat.nyutag.core.rooms.dropForgotten
 import chat.nyutag.core.store.RoomRecord
 import chat.nyutag.core.store.Store
 import chat.nyutag.core.sync.EventType
@@ -164,5 +165,22 @@ class SyncTest {
         assertEquals(2, asked.size)
         assertTrue("timeout=30000" in asked[0])
         assertTrue("timeout=0" in asked[1])
+    }
+
+    /** Чат покинули и забыли на другом устройстве: /sync о нём молчит, сверка по joined_rooms помечает его покинутым. */
+    @Test fun dropsRoomsForgottenElsewhere() = runBlocking {
+        val store = Store(JdbcSql.inMemory())
+        store.upsert(RoomRecord("!kept:nyutag.chat", RoomRecord.Membership.JOIN))
+        store.upsert(RoomRecord("!gone:nyutag.chat", RoomRecord.Membership.JOIN))
+        store.upsert(RoomRecord("!asked:nyutag.chat", RoomRecord.Membership.INVITE))
+        val transport = StubTransport()
+        transport.response = JsonValue.parse("""{"joined_rooms":["!kept:nyutag.chat"]}""")
+        val client = MatrixClient(URI("http://127.0.0.1:1"), "t", transport = transport)
+        val engine = SyncEngine(client, store, Session("@a:nyutag.chat", "D", "t", client.homeserver), this)
+        assertEquals(listOf("!gone:nyutag.chat"), engine.dropForgotten())
+        assertTrue(transport.last?.url?.path.orEmpty().endsWith("/joined_rooms"))
+        assertEquals(RoomRecord.Membership.LEAVE, store.room("!gone:nyutag.chat")?.membership)
+        assertEquals(RoomRecord.Membership.JOIN, store.room("!kept:nyutag.chat")?.membership)
+        assertEquals(RoomRecord.Membership.INVITE, store.room("!asked:nyutag.chat")?.membership)
     }
 }

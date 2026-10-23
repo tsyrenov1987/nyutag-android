@@ -59,6 +59,7 @@ import chat.nyutag.core.rooms.creators
 import chat.nyutag.core.rooms.createRoom
 import chat.nyutag.core.rooms.deleteDevice
 import chat.nyutag.core.rooms.devices
+import chat.nyutag.core.rooms.dropForgotten
 import chat.nyutag.core.rooms.event
 import chat.nyutag.core.rooms.join
 import chat.nyutag.core.rooms.joinedMembers
@@ -359,6 +360,22 @@ class AppSession(context: Context, private val doors: DoorHub) {
         }
         engine.start()
         refresh()
+        scope.launch { dropForgotten() }
+    }
+
+    /** Приложение снова на экране: за время сна чаты могли удалить на другом устройстве. */
+    fun appBecameActive() {
+        scope.launch { dropForgotten() }
+    }
+
+    /** Чаты, удалённые на другом устройстве, убираем из списка: /sync о них молчит. */
+    private suspend fun dropForgotten() {
+        val engine = engine ?: return
+        val gone = withContext(Dispatchers.IO) { runCatching { engine.dropForgotten() }.getOrNull() } ?: return
+        if (gone.isEmpty()) return
+        log("покинуты на другом устройстве: ${gone.size}")
+        refresh()
+        revisionFlow.value += 1
     }
 
     private fun stop() {
@@ -647,6 +664,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
             }
         } catch (e: Exception) {
             log("отправка $type не прошла: $e")
+            val server = (e as? E2EEException.Server)?.error ?: e as? MatrixError
+            if (server?.errcode == "M_FORBIDDEN") scope.launch { dropForgotten() }
             null
         }
     }

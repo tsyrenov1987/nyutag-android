@@ -6,6 +6,7 @@ package chat.nyutag.core.rooms
 import chat.nyutag.core.net.MatrixClient
 import chat.nyutag.core.net.MatrixClient.Method
 import chat.nyutag.core.net.MatrixError
+import chat.nyutag.core.store.RoomRecord
 import chat.nyutag.core.sync.Event
 import chat.nyutag.core.sync.EventType
 import chat.nyutag.core.sync.SyncEngine
@@ -152,6 +153,10 @@ suspend fun MatrixClient.forget(roomID: String) {
     request(Method.POST, "rooms/$roomID/forget", body = emptyObject)
 }
 
+/** Комнаты, где мы сейчас `join`, по мнению сервера. */
+suspend fun MatrixClient.joinedRooms(): Set<String> =
+    (request(Method.GET, "joined_rooms")["joined_rooms"]?.array ?: emptyList()).mapNotNull { it.string }.toSet()
+
 suspend fun MatrixClient.invite(roomID: String, userID: String, reason: String? = null) {
     val body = linkedMapOf<String, JsonValue>("user_id" to JsonValue.Str(userID))
     if (reason != null) body["reason"] = JsonValue.Str(reason)
@@ -208,6 +213,24 @@ suspend fun SyncEngine.leave(roomID: String, forget: Boolean = false) {
     if (!forget) return
     client.forget(roomID)
     try { store.deleteRoom(roomID) } catch (e: Exception) { throw MatrixError(MatrixError.Kind.Decoding("хранилище: $e")) }
+}
+
+/** Комнату, которую на другом устройстве покинули и забыли, `/sync` больше не присылает вовсе, и здесь она
+ *  навсегда осталась бы `join`. Сверяемся со списком сервера; возвращает комнаты, помеченные покинутыми. */
+suspend fun SyncEngine.dropForgotten(): List<String> {
+    // Снимок до запроса: комната, в которую вошли, пока он шёл, в снимок не попадёт и не пострадает.
+    val local = try { store.rooms(RoomRecord.Membership.JOIN) } catch (e: Exception) { throw MatrixError(MatrixError.Kind.Decoding("хранилище: $e")) }
+    val joined = client.joinedRooms()
+    try {
+        val gone = local.filter { it.id !in joined }
+        for (record in gone) {
+            record.membership = RoomRecord.Membership.LEAVE
+            store.upsert(record)
+        }
+        return gone.map { it.id }
+    } catch (e: Exception) {
+        throw MatrixError(MatrixError.Kind.Decoding("хранилище: $e"))
+    }
 }
 
 data class Backfill(val added: Int, val hasMore: Boolean)

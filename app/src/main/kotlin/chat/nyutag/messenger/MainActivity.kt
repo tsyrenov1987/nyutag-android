@@ -161,6 +161,7 @@ class MainActivity : ComponentActivity() {
         visible = true
         app.session.visibleRoom = shownRoom
         app.doors.appBecameActive()
+        app.session.appBecameActive()
     }
 
     override fun onStop() {

@@ -176,7 +176,7 @@ object ChatFeed {
                 }
             }
             var reply: FeedItem.Quote? = null
-            if (body !is FeedItem.Body.Notice) {
+            if (body !is FeedItem.Body.Notice && body != FeedItem.Body.Deleted) {
                 val target = event.content.at("m.relates_to", "m.in_reply_to", "event_id")?.string
                 if (target != null) {
                     var quoted = byID[target]
@@ -185,6 +185,9 @@ object ChatFeed {
                         if (stored != null) quoted = if (stored.type == EventType.ENCRYPTED) (decrypt(stored, roomID) ?: stored) else stored
                     }
                     val author = quoted?.sender
+                    // Цитата показывает текст после правки.
+                    val fresh = edits[target]
+                    if (quoted != null && fresh != null && quoted.type != EventType.ENCRYPTED) quoted = quoted.copy(content = fresh)
                     if (quoted != null && author != null) {
                         val kind = if (quoted.type == EventType.ENCRYPTED) PushPreview.Kind.Locked else PushReader.kind(quoted, me)
                         reply = FeedItem.Quote(target, name(author), kind)

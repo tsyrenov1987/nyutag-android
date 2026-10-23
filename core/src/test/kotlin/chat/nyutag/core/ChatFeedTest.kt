@@ -153,6 +153,23 @@ class ChatFeedTest {
         assertEquals(FeedItem.Quote("\$s", "Арюна", PushPreview.Kind.Text("тайна")), answer.reply)
     }
 
+    @Test fun replyQuotesEditedText() = runBlocking {
+        val store = prepared()
+        store.append(listOf(
+            text("\$1", arjuna, 100, "сайн"),
+            Event(eventID = "\$e", type = EventType.MESSAGE, sender = arjuna, originServerTS = 101, content = Relations.edit("\$1", "сайн байна"), roomID = room),
+            text("\$a", me, 110, "ответ", mapOf(
+                "m.relates_to" to JsonValue.of("m.in_reply_to" to JsonValue.of("event_id" to "\$1")),
+            )),
+        ))
+        val answer = ChatFeed.items(room, store, me).first { it.id == "\$a" }
+        assertEquals(PushPreview.Kind.Text("сайн байна"), answer.reply?.preview)
+
+        // Удалённый ответ цитату не несёт.
+        store.append(listOf(redaction("\$x", me, 120, "\$a")))
+        assertNull(ChatFeed.items(room, store, me).first { it.id == "\$a" }.reply)
+    }
+
     @Test fun notices() = runBlocking {
         val store = prepared()
         val algorithm = JsonValue.of("algorithm" to "m.megolm.v1.aes-sha2")

@@ -127,6 +127,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -269,8 +270,9 @@ class AppSession(context: Context, private val doors: DoorHub) {
         scope.launch { start(signed, password) }
     }
 
-    suspend fun signOut() {
-        val account = account ?: return
+    /** Меню закрывается раньше, чем выход закончится, и отменяет свою корутину — выход доводится до конца. */
+    suspend fun signOut() = withContext(NonCancellable) {
+        val account = account ?: return@withContext
         pushFlags.getString("token", null)?.let { token ->
             runCatching { account.client.removeAndroidPush(token, BuildConfig.DEBUG) }.onFailure { log("пушер не снят: $it") }
         }
@@ -292,12 +294,14 @@ class AppSession(context: Context, private val doors: DoorHub) {
             log("отказ удаления аккаунта: $e")
             throw SignInException(SignInFailure.BROKEN)
         }
-        stop()
-        withContext(Dispatchers.IO) {
-            runCatching { account.store.close() }
-            runCatching { keeper.forget(account.session.userID) }
+        withContext(NonCancellable) {
+            stop()
+            withContext(Dispatchers.IO) {
+                runCatching { account.store.close() }
+                runCatching { keeper.forget(account.session.userID) }
+            }
+            clear()
         }
-        clear()
         log("аккаунт удалён")
     }
 

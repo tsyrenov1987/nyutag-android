@@ -25,6 +25,15 @@ import chat.nyutag.core.crypto.sendToDevice
 import chat.nyutag.core.crypto.importCrossSigning
 import chat.nyutag.core.crypto.relockWithPassword
 import chat.nyutag.core.crypto.unlockWithPassword
+import chat.nyutag.core.media.Attachment
+import chat.nyutag.messenger.data.OutgoingFile
+import chat.nyutag.messenger.data.SoyomboSticker
+import chat.nyutag.core.media.uploadEncrypted
+import chat.nyutag.core.rooms.Sticker
+import chat.nyutag.core.rooms.StickerPack
+import chat.nyutag.core.rooms.Stickers
+import chat.nyutag.core.rooms.addSticker
+import chat.nyutag.core.rooms.removeSticker
 import chat.nyutag.core.media.MXC
 import chat.nyutag.core.media.MediaCache
 import chat.nyutag.core.media.ThumbnailMethod
@@ -184,6 +193,7 @@ class AppSession(context: Context, private val doors: DoorHub) {
     private val flags = context.getSharedPreferences("nyutag.history", Context.MODE_PRIVATE)
     /** Токен FCM этого телефона: нужен и при входе, и при выходе, когда Firebase уже может не ответить. */
     private val pushFlags = context.getSharedPreferences("nyutag.push", Context.MODE_PRIVATE)
+    private val soyomboFlags = context.getSharedPreferences("nyutag.soyombo", Context.MODE_PRIVATE)
     /** Чат, открытый на экране, пока приложение видно: его пуши не показываем. */
     @Volatile var visibleRoom: String? = null
     /** Шифрование этого входа поднято (или не поднялось): пуш расшифровывает той же машиной, что и список. */
@@ -598,6 +608,96 @@ class AppSession(context: Context, private val doors: DoorHub) {
                           "m.relates_to" to JsonValue.of("m.in_reply_to" to JsonValue.of("event_id" to replyTo)))
         return post(EventType.MESSAGE, content, roomID, transactionID)
     }
+
+    /** Файл, картинка, ролик или голосовое в чат: в шифрованный — шифртекстом (ключ уедет внутри реплики),
+     *  в открытый — как есть. Формат общий с iOS. */
+    suspend fun sendAttachment(roomID: String, file: OutgoingFile, transactionID: String): String? {
+        val account = account ?: return null
+        val encrypted = withContext(Dispatchers.IO) { runCatching { account.store.room(roomID)?.isEncrypted }.getOrNull() } ?: false
+        suspend fun upload(data: ByteArray, type: String, name: String): Attachment.Source =
+            if (encrypted) Attachment.Source.Sealed(account.client.uploadEncrypted(data))
+            else Attachment.Source.Plain(account.client.uploadMedia(data, type, name))
+        val source = try {
+            upload(file.data, file.mimetype, file.name)
+        } catch (e: Exception) {
+            log("загрузка вложения не прошла: $e")
+            return null
+        }
+        // Миниатюра ролика — тем же способом, что и сам файл. Без неё ролик всё равно уйдёт.
+        val preview = file.thumbnail?.let { thumb ->
+            runCatching { upload(thumb.data, "image/jpeg", "thumb.jpg") }.getOrNull()
+                ?.let { Attachment.Preview(it, size = thumb.data.size, width = thumb.width, height = thumb.height) }
+        }
+        val content = Attachment.content(source, file.name, file.mimetype, file.data.size, file.width, file.height,
+                                         file.viewOnce, preview, file.duration, file.voice)
+        return post(EventType.MESSAGE, content, roomID, transactionID)
+    }
+
+    /** Содержимое вложения, уже расшифрованное. `preview` — миниатюра для ленты, если она есть. */
+    suspend fun attachmentData(attachment: Attachment, preview: Boolean): ByteArray? {
+        val media = media ?: return null
+        return runCatching {
+            when (val source = if (preview) attachment.thumbnail ?: attachment.source else attachment.source) {
+                is Attachment.Source.Sealed -> media.decrypted(source.file)
+                // Открытую картинку без своей миниатюры уменьшит сервер.
+                is Attachment.Source.Plain -> media.data(source.address,
+                    if (preview && attachment.thumbnail == null && !attachment.isSticker) MediaCache.Size(800, 800) else null)
+            }
+        }.onFailure { log("вложение не скачалось: $it") }.getOrNull()
+    }
+
+    // MARK: Стикеры
+
+    suspend fun myStickers(): StickerPack {
+        val store = account?.store ?: return StickerPack(STICKER_PACK, emptyList())
+        return withContext(Dispatchers.IO) { runCatching { Stickers.mine(store, STICKER_PACK) }.getOrNull() } ?: StickerPack(STICKER_PACK, emptyList())
+    }
+
+    /** Картинка из галереи в свой набор: PNG до 512 точек, загружается открыто (стикер — не секрет). */
+    suspend fun addSticker(png: ByteArray, name: String, width: Int, height: Int): Sticker? {
+        val account = account ?: return null
+        val mxc = runCatching { account.client.uploadMedia(png, "image/png", "$name.png") }.getOrNull() ?: return null
+        runCatching { media?.store(png, mxc) }
+        return addSticker(Sticker(name, mxc, mimetype = "image/png", width = width, height = height))
+    }
+
+    /** Чужой стикер из ленты в свой набор: тот же адрес, без повторной загрузки. */
+    suspend fun addSticker(sticker: Sticker): Sticker? {
+        val account = account ?: return null
+        val me = me ?: return null
+        return runCatching { account.client.addSticker(sticker, me, STICKER_PACK, account.store) }
+            .onFailure { log("стикер не добавился: $it") }.getOrNull()?.also { revisionFlow.value += 1 }
+    }
+
+    suspend fun removeSticker(shortcode: String): Boolean {
+        val account = account ?: return false
+        val me = me ?: return false
+        if (runCatching { account.client.removeSticker(shortcode, me, account.store) }.isFailure) return false
+        revisionFlow.value += 1
+        return true
+    }
+
+    /** Стикер встроенного набора с соёмбо: при первой отправке картинка загружается, адрес запоминается для учётки. */
+    suspend fun soyomboSticker(item: SoyomboSticker): Sticker? {
+        val account = account ?: return null
+        val me = me ?: return null
+        val key = "${SoyomboSticker.VERSION}.$me.${item.shortcode}"
+        val side = SoyomboSticker.SIDE
+        soyomboFlags.getString(key, null)?.let(MXC::parse)?.let {
+            return Sticker(item.shortcode, it, item.body, "image/png", side, side)
+        }
+        val png = withContext(Dispatchers.Default) { item.png() }
+        val mxc = runCatching { account.client.uploadMedia(png, "image/png", item.shortcode + ".png") }.getOrNull() ?: return null
+        runCatching { media?.store(png, mxc) }
+        soyomboFlags.edit().putString(key, mxc.toString()).apply()
+        return Sticker(item.shortcode, mxc, item.body, "image/png", side, side)
+    }
+
+    suspend fun sendSticker(roomID: String, sticker: Sticker, transactionID: String): String? =
+        post(EventType.STICKER, sticker.content, roomID, transactionID)
+
+    /** Картинка стикера целиком (они маленькие), из кэша. */
+    suspend fun stickerData(mxc: MXC): ByteArray? = runCatching { media?.data(mxc) }.getOrNull()
 
     /** Новый текст своей реплики. */
     suspend fun edit(roomID: String, eventID: String, text: String): Boolean =
@@ -1094,6 +1194,8 @@ class AppSession(context: Context, private val doors: DoorHub) {
     }
 
     companion object {
+        /** Имя своего набора стикеров в данных учётки: ставится при первом стикере. */
+        const val STICKER_PACK = "Нютаг"
         private val deviceName = "Нютаг Android" + (Build.MODEL?.let { " ($it)" } ?: "")
 
         fun needsResolve(identifier: String): Boolean {

@@ -77,11 +77,62 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
+import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import chat.nyutag.core.media.Attachment
+import chat.nyutag.core.media.Voice
+import chat.nyutag.core.push.PushPreview
+import chat.nyutag.core.rooms.Sticker
+import chat.nyutag.core.sync.EventType
+import chat.nyutag.messenger.data.OutgoingFile
+import chat.nyutag.messenger.data.Pictures
+import chat.nyutag.messenger.data.SoyomboSticker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
-/** Своя реплика до прихода с сервера. `eventID` — когда сервер принял: ждём её в ленте. */
+/** Своя реплика до прихода с сервера. `eventID` — когда сервер принял: ждём её в ленте.
+ *  Вложение и стикер едут вместе с репликой: при повторе отправляются те же байты. */
 private data class Outgoing(val transactionID: String, val text: String, val ts: Long,
                             val eventID: String? = null, val failed: Boolean = false,
-                            val replyTo: String? = null, val quote: Pair<String, String>? = null)
+                            val replyTo: String? = null, val quote: Pair<String, String>? = null,
+                            val file: OutgoingFile? = null, val sticker: Sticker? = null, val soyombo: SoyomboSticker? = null,
+                            val local: ByteArray? = null)
+
+/** Вложение в пузыре: из ленты (`attachment`) или своё, ещё в очереди (`local` — байты картинки). */
+private class Media(
+    val kind: PushPreview.Kind, val attachment: Attachment?, val local: ByteArray?, val name: String, val size: Int?,
+    val width: Int?, val height: Int?, val duration: Int?, val viewOnce: Boolean, val voice: Boolean,
+) {
+    val isPicture: Boolean get() = !viewOnce && (kind == PushPreview.Kind.Image && (attachment?.isImage ?: (local != null)) || kind == PushPreview.Kind.Video)
+
+    companion object {
+        fun of(kind: PushPreview.Kind, attachment: Attachment) = Media(
+            kind, attachment, null, attachment.name, attachment.size, attachment.width, attachment.height,
+            attachment.duration, attachment.viewOnce, attachment.isVoice || attachment.msgtype == "m.audio")
+
+        fun of(out: Outgoing): Media? {
+            out.file?.let { file ->
+                val kind = when (Attachment.msgtypeFor(file.mimetype)) {
+                    "m.image" -> PushPreview.Kind.Image
+                    "m.video" -> PushPreview.Kind.Video
+                    "m.audio" -> PushPreview.Kind.Audio
+                    else -> PushPreview.Kind.File
+                }
+                val local = if (kind == PushPreview.Kind.Image) file.data else file.thumbnail?.data
+                return Media(kind, null, local, file.name, file.data.size, file.width, file.height, file.duration, file.viewOnce, false)
+            }
+            if (out.sticker != null || out.soyombo != null) {
+                return Media(PushPreview.Kind.Sticker, out.sticker?.let { Attachment(msgtype = EventType.STICKER, source = Attachment.Source.Plain(it.mxc), name = it.body) },
+                             out.local, out.text, null, null, null, null, false, false)
+            }
+            return null
+        }
+    }
+}
 
 /** Что можно сделать с репликой из меню долгого нажатия. */
 private sealed class Action {
@@ -92,6 +143,7 @@ private sealed class Action {
     object Forward : Action()
     object Report : Action()
     data class React(val key: String) : Action()
+    object SaveSticker : Action()
 }
 
 /** Быстрые реакции в меню, по порядку, как на iOS. */
@@ -131,6 +183,19 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     val listState = rememberLazyListState()
     val mic = rememberMicAccess()
     val camera = rememberCameraAccess()
+    val recorder = remember(roomID) { VoiceRecorder(context.applicationContext) }
+    var recording by remember(roomID) { mutableStateOf(false) }
+    var recorded by remember(roomID) { mutableStateOf(0) }
+    var stickersOpen by remember(roomID) { mutableStateOf(false) }
+    var pickingOnce by remember(roomID) { mutableStateOf(false) }
+    var openingID by remember(roomID) { mutableStateOf<String?>(null) }
+    var viewing by remember(roomID) { mutableStateOf<Bitmap?>(null) }
+    var watching by remember(roomID) { mutableStateOf<java.io.File?>(null) }
+    var viewingOnce by remember(roomID) { mutableStateOf<Pair<String, Bitmap>?>(null) }
+    var notice by remember(roomID) { mutableStateOf<String?>(null) }
+    val seenOnce by ViewOnceSeen.seen.collectAsState()
+    LaunchedEffect(Unit) { ViewOnceSeen.load(context) }
+    DisposableEffect(roomID) { onDispose { recorder.cancel(); VoicePlayer.stop() } }
     // Звонить можно один на один и в шифрованную группу; состав комнаты меняется синхронизацией.
     val callKind by produceState(AppSession.CallKind.NONE, roomID, revision) { value = session.callKind(roomID) }
 
@@ -177,11 +242,19 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     fun send(text: String, transactionID: String = TransactionID.make(), reply: FeedItem? = null,
              retry: Outgoing? = null) {
         val index = outbox.indexOfFirst { it.transactionID == transactionID }
-        val pending = Outgoing(transactionID, text, System.currentTimeMillis(),
-                               replyTo = reply?.id ?: retry?.replyTo, quote = reply?.let { quoteOf(it, words) } ?: retry?.quote)
+        val pending = retry?.copy(failed = false, ts = System.currentTimeMillis())
+            ?: Outgoing(transactionID, text, System.currentTimeMillis(), replyTo = reply?.id, quote = reply?.let { quoteOf(it, words) })
         if (index >= 0) outbox[index] = pending else outbox.add(pending)
         scope.launch {
-            val eventID = session.sendText(roomID, text, transactionID, pending.replyTo)
+            val eventID = when {
+                pending.file != null -> session.sendAttachment(roomID, pending.file, transactionID)
+                pending.sticker != null -> session.sendSticker(roomID, pending.sticker, transactionID)
+                pending.soyombo != null -> session.soyomboSticker(pending.soyombo)?.let { session.sendSticker(roomID, it, transactionID) }
+                else -> session.sendText(roomID, text, transactionID, pending.replyTo)
+            }
+            if (BuildConfig.DEBUG && (pending.file != null || pending.sticker != null || pending.soyombo != null)) {
+                android.util.Log.d("ui-check", "вложение ${pending.file?.mimetype ?: "стикер"} ${if (eventID == null) "не ушло" else "ушло"}")
+            }
             val at = outbox.indexOfFirst { it.transactionID == transactionID }
             if (at < 0) return@launch
             when {
@@ -189,6 +262,127 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                 items.any { it.id == eventID } -> outbox.removeAt(at)
                 else -> outbox[at] = outbox[at].copy(eventID = eventID)
             }
+        }
+    }
+
+    /** Вложение сразу видно в ленте с часиками, как и текст. */
+    fun queue(file: OutgoingFile) {
+        val label = when (Attachment.msgtypeFor(file.mimetype)) {
+            "m.image" -> words(P.image)
+            "m.video" -> words(P.video)
+            "m.audio" -> words(P.audio)
+            else -> file.name
+        }
+        val tx = TransactionID.make()
+        outbox.add(Outgoing(tx, label, System.currentTimeMillis(), file = file))
+        send(label, tx, retry = outbox.last())
+    }
+
+    fun queueSticker(sticker: Sticker?, soyombo: SoyomboSticker?) {
+        val tx = TransactionID.make()
+        val local = soyombo?.png()
+        val pending = Outgoing(tx, sticker?.body ?: soyombo?.body.orEmpty(), System.currentTimeMillis(), sticker = sticker, soyombo = soyombo, local = local)
+        outbox.add(pending)
+        send(pending.text, tx, retry = pending)
+    }
+
+    /** Подготовка файла не в главном потоке; не вышло — короткое объяснение. */
+    fun prepare(make: () -> OutgoingFile?) {
+        scope.launch {
+            val file = try {
+                withContext(Dispatchers.IO) { make() }
+            } catch (e: OutgoingFile.TooBig) {
+                notice = words(P.videoTooBig)
+                return@launch
+            }
+            if (file == null) { failed = true; return@launch }
+            if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "вложение готово: ${file.mimetype} ${file.width ?: 0}×${file.height ?: 0}, ${file.data.size / 1024} КБ, миниатюра ${file.thumbnail?.data?.size ?: 0} Б")
+            queue(file)
+        }
+    }
+
+    val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val once = pickingOnce
+        pickingOnce = false
+        uri ?: return@rememberLauncherForActivityResult
+        val stamp = "photo-" + System.currentTimeMillis() / 1000
+        val type = context.contentResolver.getType(uri).orEmpty()
+        prepare {
+            if (type.startsWith("video/")) OutgoingFile.video(context, uri, stamp.replace("photo", "video"))
+            else OutgoingFile.photo(context, uri, stamp, viewOnce = once)
+        }
+    }
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        prepare { OutgoingFile.file(context, uri) }
+    }
+    val pickSticker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val png = withContext(Dispatchers.IO) { runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()?.let { Pictures.stickerPNG(it) } }
+            val added = png?.let { (data, w, h) -> session.addSticker(data, "sticker", w, h) }
+            if (added == null) notice = words(P.stickerFailed)
+        }
+    }
+
+    /** Вложение на весь экран или в другом приложении: расшифрованная копия во временной папке. */
+    fun open(item: FeedItem) {
+        val attachment = item.attachment ?: return
+        if (openingID != null) return
+        if (attachment.isVoice || attachment.isSticker) return
+        if (attachment.viewOnce) {
+            if (item.isMine || item.id in seenOnce) return
+            openingID = item.id
+            scope.launch {
+                val data = session.attachmentData(attachment, preview = false)
+                val image = data?.let { withContext(Dispatchers.Default) { Pictures.decode(it, 2560) } }
+                openingID = null
+                if (image == null) { failed = true; return@launch }
+                ViewOnceSeen.mark(context, item.id)
+                viewingOnce = item.id to image
+                if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "исчезающее фото открыто, ${image.width}×${image.height}")
+            }
+            return
+        }
+        openingID = item.id
+        scope.launch {
+            val data = session.attachmentData(attachment, preview = false)
+            if (data == null) { openingID = null; failed = true; return@launch }
+            if (attachment.isImage) {
+                viewing = withContext(Dispatchers.Default) { Pictures.decode(data, 2560) }
+                if (viewing == null) failed = true
+            } else {
+                val file = withContext(Dispatchers.IO) { OpenedFiles.write(context, data, OpenedFiles.name(attachment)) }
+                if (file != null && attachment.isVideo) watching = file
+                else if (file == null || !OpenedFiles.open(context, file, attachment.mimetype)) failed = true
+            }
+            openingID = null
+            if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "вложение ${if (failed) "не открылось" else "открыто"}")
+        }
+    }
+
+    fun closeOnce(id: String) {
+        viewingOnce = null
+        scope.launch {
+            val removed = session.delete(roomID, id)
+            if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "исчезающее фото ${if (removed) "удалено" else "осталось на сервере (нет прав), но больше не откроется"}")
+        }
+    }
+
+    fun startVoice() {
+        mic.ask { granted ->
+            if (!granted) { notice = words(P.voiceNoMic); return@ask }
+            stickersOpen = false
+            if (recorder.start()) recording = true else notice = words(P.voiceNoMic)
+        }
+    }
+
+    LaunchedEffect(recording) {
+        while (recording) {
+            recorder.sample()
+            recorded = recorder.elapsed
+            if (recorded >= VoiceRecorder.LIMIT_MS) break
+            delay(50)
         }
     }
 
@@ -209,6 +403,12 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             Action.Delete -> deleting = item
             Action.Forward -> forwarding = item
             Action.Report -> reporting = item
+            Action.SaveSticker -> {
+                val attachment = item.attachment ?: return
+                val mxc = (attachment.source as? Attachment.Source.Plain)?.address ?: return
+                val sticker = Sticker(attachment.name.ifEmpty { "sticker" }, mxc, attachment.name, attachment.mimetype, attachment.width, attachment.height)
+                run("стикер в мои") { session.addSticker(sticker) != null }
+            }
             is Action.React -> run("реакция ${action.key}") { session.toggleReaction(roomID, item, action.key) }
         }
     }
@@ -257,9 +457,10 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             items(rows.asReversed(), key = { it.key }) { row ->
                 when (row) {
                     is Row.Plate -> Plate(row.text)
-                    is Row.Bubble -> Bubble(row, onRetry = {
+                    is Row.Bubble -> Bubble(session, row, busy = row.item != null && row.item.id == openingID,
+                                            seen = row.item != null && row.item.id in seenOnce, onRetry = {
                         row.retry?.let { (tx, text) -> send(text, tx, retry = outbox.firstOrNull { it.transactionID == tx }) }
-                    }, onAction = { action -> row.item?.let { act(action, it) } })
+                    }, onOpen = { row.item?.let(::open) }, onAction = { action -> row.item?.let { act(action, it) } })
                 }
             }
         }
@@ -270,7 +471,24 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             ComposerBanner(item.senderName, summary(item, words)) { replyTo = null }
         }
         val old = (editing?.body as? FeedItem.Body.Text)?.text
-        Composer(draft, editing = editing != null, ready = draft.text.isNotBlank() && draft.text.trim() != old, onChange = { value ->
+        if (recording) {
+            VoiceBar(recorded, onCancel = { recorder.cancel(); recording = false }, onSend = {
+                recording = false
+                recorder.finish()?.let(::queue)
+            })
+        } else Composer(draft, editing = editing != null, ready = draft.text.isNotBlank() && draft.text.trim() != old,
+                 stickersOpen = stickersOpen,
+                 onAttach = { kind ->
+                     stickersOpen = false
+                     when (kind) {
+                         0 -> pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                         1 -> { pickingOnce = true; pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                         else -> pickFile.launch(arrayOf("*/*"))
+                     }
+                 },
+                 onStickers = { stickersOpen = !stickersOpen },
+                 onVoice = ::startVoice,
+                 onChange = { value ->
             // «hайн» → «һайн» при наборе; длина не меняется, курсор остаётся на месте. Пока клавиатура составляет слово,
             // текст не трогаем: подмена посреди составления сбивает Gboard, и он вставляет слово заново.
             draft = (if (words.buryatLetters && value.composition == null) BuryatLetters.fix(value.text) else null)
@@ -301,6 +519,19 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             replyTo = null
             send(text, reply = reply)
         })
+        if (stickersOpen && !recording) {
+            BackHandler { stickersOpen = false }
+            StickerPanel(session, revision, onPick = { sticker, soyombo -> stickersOpen = false; queueSticker(sticker, soyombo) },
+                         onAdd = { pickSticker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                         onRemove = { sticker -> run("стикер убран") { session.removeSticker(sticker.shortcode) } })
+        }
+    }
+    viewing?.let { image -> ImageViewer(image) { viewing = null } }
+    watching?.let { file -> VideoViewer(file) { watching = null } }
+    viewingOnce?.let { (id, image) -> ViewOnceViewer(image) { closeOnce(id) } }
+    notice?.let { text ->
+        AlertDialog(onDismissRequest = { notice = null }, title = { Text(text) },
+                    confirmButton = { TextButton({ notice = null }) { Text(words(P.done), color = palette.sky) } })
     }
     deleting?.let { item ->
         AlertDialog(onDismissRequest = { deleting = null },
@@ -375,6 +606,7 @@ private sealed class Row(val key: String) {
         val retry: Pair<String, String>? = null,
         /** Реплика из ленты: по ней меню долгого нажатия. У очереди отправки её нет. */
         val item: FeedItem? = null,
+        val media: Media? = null,
     ) : Row(key)
 }
 
@@ -405,9 +637,11 @@ private fun layout(items: List<FeedItem>, outbox: List<Outgoing>, line: ChatLine
         val firstInRun = item.sender != lastSender || item.ts - lastTS > 10 * 60_000
         lastSender = item.sender
         lastTS = item.ts
+        val media = (body as? FeedItem.Body.Attachment)?.let { b -> item.attachment?.let { Media.of(b.kind, it) } }
         val (text, muted) = when (body) {
             is FeedItem.Body.Text -> body.text to false
-            is FeedItem.Body.Attachment -> (kindLabel(body.kind, words) + (body.caption?.let { "\n$it" } ?: "")) to false
+            is FeedItem.Body.Attachment -> (if (media != null) body.caption.orEmpty()
+                                            else kindLabel(body.kind, words) + (body.caption?.let { "\n$it" } ?: "")) to false
             FeedItem.Body.Locked -> words(P.waitingKey) to true
             FeedItem.Body.Deleted -> words(P.deleted) to true
             is FeedItem.Body.Notice -> "" to true
@@ -417,16 +651,17 @@ private fun layout(items: List<FeedItem>, outbox: List<Outgoing>, line: ChatLine
             text = text, muted = muted, quote = item.reply?.let { it.senderName to kindLabel(it.preview, words) },
             forwarded = item.forwarded, edited = item.edited, time = clock(item.ts),
             delivery = if (!item.isMine) ChatLine.Delivery.NONE else if (item.isRead) ChatLine.Delivery.READ else ChatLine.Delivery.SENT,
-            reactions = item.reactions, item = item.takeIf { body != FeedItem.Body.Deleted },
+            reactions = item.reactions, item = item.takeIf { body != FeedItem.Body.Deleted }, media = media,
         )
     }
     for (out in outbox) {
         day(out.ts)
+        val media = Media.of(out)
         rows += Row.Bubble(
-            key = "tx-${out.transactionID}", mine = true, author = null, text = out.text, muted = false, quote = out.quote,
+            key = "tx-${out.transactionID}", mine = true, author = null, text = if (media != null) "" else out.text, muted = false, quote = out.quote,
             forwarded = false, edited = false, time = if (out.failed) words(P.notSent) else clock(out.ts),
             delivery = ChatLine.Delivery.NONE, reactions = emptyList(), pending = !out.failed, failed = out.failed,
-            retry = if (out.failed) out.transactionID to out.text else null,
+            retry = if (out.failed) out.transactionID to out.text else null, media = media,
         )
     }
     return rows
@@ -468,7 +703,8 @@ private fun Plate(text: String) {
 }
 
 @Composable
-private fun Bubble(row: Row.Bubble, onRetry: () -> Unit, onAction: (Action) -> Unit) {
+private fun Bubble(session: AppSession, row: Row.Bubble, busy: Boolean, seen: Boolean, onRetry: () -> Unit, onOpen: () -> Unit,
+                   onAction: (Action) -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
@@ -479,13 +715,16 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit, onAction: (Action) -> U
         row.author?.let {
             Text(it, color = palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 12.dp, bottom = 2.dp))
         }
+        val media = row.media
+        val sticker = media?.kind == PushPreview.Kind.Sticker
         Box {
             Column(Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp))
-                       .background(if (row.mine) palette.mine.copy(alpha = if (row.pending) 0.8f else 1f) else palette.card)
+                       .background(if (sticker) Color.Transparent
+                                   else if (row.mine) palette.mine.copy(alpha = if (row.pending) 0.8f else 1f) else palette.card)
                        .combinedClickable(enabled = row.failed || row.item != null,
                                           onLongClick = if (row.item != null) ({ menu = true }) else null,
-                                          onClick = { if (row.failed) onRetry() })
-                       .padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                          onClick = { if (row.failed) onRetry() else if (media != null) onOpen() })
+                       .padding(horizontal = if (sticker) 0.dp else 12.dp, vertical = 7.dp)) {
                 if (row.forwarded) Text(words(P.forwarded), color = quiet, fontSize = 12.sp)
                 row.quote?.let { (name, preview) ->
                     Row(Modifier.padding(bottom = 4.dp).clip(RoundedCornerShape(8.dp))
@@ -497,13 +736,26 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit, onAction: (Action) -> U
                         }
                     }
                 }
-                Text(row.text, color = if (row.muted) quiet else ink, fontSize = 16.sp,
+                if (media != null) {
+                    val key = row.item?.id ?: row.key
+                    when {
+                        sticker -> StickerPicture(session, "sticker-${media.attachment?.source?.mxc ?: key}", media.attachment, media.local)
+                        media.viewOnce -> ViewOnceChip(row.mine, seen, ink, quiet, busy)
+                        media.voice && media.attachment != null -> VoiceBubble(session, key, media.attachment, ink, quiet)
+                        media.isPicture -> Box(Modifier.padding(bottom = if (row.text.isEmpty()) 0.dp else 4.dp)) {
+                            AttachmentPicture(session, "picture-$key", media.attachment, media.local, media.width, media.height)
+                            if (media.kind == PushPreview.Kind.Video) VideoBadge(media.duration, busy, Modifier.matchParentSize())
+                        }
+                        else -> FileChip(media.name, media.size, ink, quiet, busy)
+                    }
+                }
+                if (row.text.isNotEmpty()) Text(row.text, color = if (row.muted) quiet else ink, fontSize = 16.sp,
                      fontStyle = if (row.muted) androidx.compose.ui.text.font.FontStyle.Italic else null)
                 Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (row.edited) Text(words(P.edited), color = quiet, fontSize = 11.sp)
-                    Text(row.time, color = if (row.failed) palette.gold else quiet, fontSize = 11.sp)
+                    Text(row.time, color = if (row.failed) palette.gold else if (sticker) palette.quiet else quiet, fontSize = 11.sp)
                     if (row.pending) Text("🕓", fontSize = 10.sp)
-                    if (row.mine) Ticks(row.delivery, color = quiet, readColor = palette.readOnBlue)
+                    if (row.mine) Ticks(row.delivery, color = if (sticker) palette.quiet else quiet, readColor = if (sticker) palette.sky else palette.readOnBlue)
                 }
             }
             row.item?.let { item -> MessageMenu(menu, item, { menu = false }) { menu = false; onAction(it) } }
@@ -523,11 +775,13 @@ private fun Bubble(row: Row.Bubble, onRetry: () -> Unit, onAction: (Action) -> U
 }
 
 @Composable
-private fun Composer(text: TextFieldValue, editing: Boolean, ready: Boolean, onChange: (TextFieldValue) -> Unit,
+private fun Composer(text: TextFieldValue, editing: Boolean, ready: Boolean, stickersOpen: Boolean, onAttach: (Int) -> Unit,
+                     onStickers: () -> Unit, onVoice: () -> Unit, onChange: (TextFieldValue) -> Unit,
                      onLetter: (Char) -> Unit, onSend: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     var typing by remember { mutableStateOf(false) }
+    var attachMenu by remember { mutableStateOf(false) }
     // Строка «ө ү һ»: на русской раскладке этих букв нет. Кнопки не забирают фокус, клавиатура остаётся.
     if (typing && words.buryatLetters) {
         Row(Modifier.fillMaxWidth().background(palette.card).padding(start = 10.dp, end = 10.dp, top = 8.dp),
@@ -541,17 +795,66 @@ private fun Composer(text: TextFieldValue, editing: Boolean, ready: Boolean, onC
         }
     }
     Row(Modifier.fillMaxWidth().background(palette.card).padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.weight(1f).clip(RoundedCornerShape(20.dp)).background(palette.milk).padding(horizontal = 14.dp, vertical = 10.dp)) {
-            if (text.text.isEmpty()) Text(words(P.messageField), color = palette.quiet, fontSize = 16.sp)
-            BasicTextField(text, onChange, Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }, maxLines = 6,
-                           textStyle = TextStyle(color = palette.ink, fontSize = 16.sp), cursorBrush = SolidColor(palette.sky),
-                           keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences))
+        verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (!editing) {
+            Box {
+                RoundKey("📎", words(P.attach)) { attachMenu = true }
+                DropdownMenu(attachMenu, { attachMenu = false }) {
+                    DropdownMenuItem({ Text(words(P.photoAction)) }, { attachMenu = false; onAttach(0) })
+                    DropdownMenuItem({ Text(words(P.viewOnceAction)) }, { attachMenu = false; onAttach(1) })
+                    DropdownMenuItem({ Text(words(P.fileAction)) }, { attachMenu = false; onAttach(2) })
+                }
+            }
         }
-        Box(Modifier.size(42.dp).clip(CircleShape).background(if (ready) palette.sky else palette.sky.copy(alpha = 0.4f))
-                .clickable(enabled = ready, onClick = onSend),
-            contentAlignment = Alignment.Center) {
-            Text(if (editing) "✓" else "➤", color = Color.White, fontSize = 18.sp)
+        Row(Modifier.weight(1f).clip(RoundedCornerShape(20.dp)).background(palette.milk).padding(start = 14.dp),
+            verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.weight(1f).padding(vertical = 10.dp)) {
+                if (text.text.isEmpty()) Text(words(P.messageField), color = palette.quiet, fontSize = 16.sp)
+                BasicTextField(text, onChange, Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }, maxLines = 6,
+                               textStyle = TextStyle(color = palette.ink, fontSize = 16.sp), cursorBrush = SolidColor(palette.sky),
+                               keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences))
+            }
+            if (!editing) {
+                Text(if (stickersOpen) "⌨" else "😊", fontSize = 20.sp, color = palette.quiet,
+                     modifier = Modifier.clip(CircleShape).clickable(onClick = onStickers).padding(horizontal = 10.dp, vertical = 8.dp))
+            }
+        }
+        if (!editing && text.text.isBlank()) {
+            Box(Modifier.size(42.dp).clip(CircleShape).background(palette.sky).clickable(onClickLabel = words(P.voiceRecord), onClick = onVoice),
+                contentAlignment = Alignment.Center) {
+                Text("🎤", fontSize = 18.sp)
+            }
+        } else {
+            Box(Modifier.size(42.dp).clip(CircleShape).background(if (ready) palette.sky else palette.sky.copy(alpha = 0.4f))
+                    .clickable(enabled = ready, onClick = onSend),
+                contentAlignment = Alignment.Center) {
+                Text(if (editing) "✓" else "➤", color = Color.White, fontSize = 18.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RoundKey(mark: String, label: String, onClick: () -> Unit) {
+    val palette = LocalPalette.current
+    Box(Modifier.size(42.dp).clip(CircleShape).clickable(onClickLabel = label, onClick = onClick), contentAlignment = Alignment.Center) {
+        Text(mark, fontSize = 20.sp, color = palette.quiet)
+    }
+}
+
+/** Идёт запись голосового: красная точка, время, «Отмена» и отправка. */
+@Composable
+private fun VoiceBar(elapsed: Int, onCancel: () -> Unit, onSend: () -> Unit) {
+    val words = LocalWords.current
+    val palette = LocalPalette.current
+    Row(Modifier.fillMaxWidth().background(palette.card).padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFD03A2F)))
+        Text(Voice.clock(elapsed), color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        Box(Modifier.weight(1f))
+        TextButton(onCancel) { Text(words(P.voiceCancel), color = Color(0xFFD03A2F)) }
+        Box(Modifier.size(42.dp).clip(CircleShape).background(palette.sky).clickable(onClick = onSend), contentAlignment = Alignment.Center) {
+            Text("➤", color = Color.White, fontSize = 18.sp)
         }
     }
 }
@@ -575,6 +878,9 @@ private fun MessageMenu(expanded: Boolean, item: FeedItem, onDismiss: () -> Unit
         }
         DropdownMenuItem({ Text(words(P.reply)) }, { onAction(Action.Reply) })
         if (item.body is FeedItem.Body.Text) DropdownMenuItem({ Text(words(P.copy)) }, { onAction(Action.Copy) })
+        if (item.attachment?.isSticker == true && !item.isMine && item.attachment?.source is chat.nyutag.core.media.Attachment.Source.Plain) {
+            DropdownMenuItem({ Text(words(P.stickerSave)) }, { onAction(Action.SaveSticker) })
+        }
         if (item.canForward) DropdownMenuItem({ Text(words(P.forward)) }, { onAction(Action.Forward) })
         if (item.canEdit) DropdownMenuItem({ Text(words(P.editAction)) }, { onAction(Action.Edit) })
         if (item.canDelete) DropdownMenuItem({ Text(words(P.deleteAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Delete) })

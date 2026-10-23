@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Расшифрованные вложения, которые открываются в другом приложении. -->
+<paths>
+    <cache-path name="opened" path="opened/" />
+</paths>

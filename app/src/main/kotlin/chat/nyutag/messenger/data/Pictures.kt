@@ -45,8 +45,33 @@ object Pictures {
         return jpeg(scaled)
     }
 
-    private fun jpeg(image: Bitmap): ByteArray =
-        ByteArrayOutputStream().also { image.compress(Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
+    /** Своя картинка в стикеры: длинная сторона до 512, PNG с прозрачностью. Ширина и высота — для набора. */
+    fun stickerPNG(data: ByteArray, longest: Int = 512): Triple<ByteArray, Int, Int>? {
+        val image = upright(data, longest) ?: return null
+        val side = max(image.width, image.height)
+        val scaled = if (side > longest) {
+            val scale = longest.toFloat() / side
+            Bitmap.createScaledBitmap(image, (image.width * scale).toInt(), (image.height * scale).toInt(), true)
+        } else {
+            image
+        }
+        val png = ByteArrayOutputStream().also { scaled.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        return Triple(png, scaled.width, scaled.height)
+    }
+
+    /** В JPEG прозрачность пропадает и становится чёрной: прозрачные места заливаем белым. */
+    private fun jpeg(image: Bitmap): ByteArray {
+        val flat = if (image.hasAlpha()) {
+            Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888).also {
+                val canvas = android.graphics.Canvas(it)
+                canvas.drawColor(android.graphics.Color.WHITE)
+                canvas.drawBitmap(image, 0f, 0f, null)
+            }
+        } else {
+            image
+        }
+        return ByteArrayOutputStream().also { flat.compress(Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
+    }
 
     /** Камера пишет снимок как есть и кладёт поворот в EXIF: без поворота фото легло бы набок. */
     private fun upright(data: ByteArray, maxPixels: Int): Bitmap? {

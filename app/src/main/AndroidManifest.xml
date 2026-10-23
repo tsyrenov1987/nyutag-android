@@ -58,5 +58,14 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/zurkhai_widget" />
         </receiver>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/files" />
+        </provider>
     </application>
 </manifest>

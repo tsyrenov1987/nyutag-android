@@ -88,7 +88,7 @@ fun InviteScreen(session: AppSession, onClose: () -> Unit) {
         if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "приглашение ${if (current == null) "нет: $failure" else "показано"}, кодов ${mine.size}")
     }
 
-    FormPage(words(P.inviteFriend), onClose) {
+    FormPage(words(P.inviteFriend), onClose, closeTitle = words(P.done)) {
         FormCard {
             Column(Modifier.fillMaxWidth().padding(vertical = 20.dp, horizontal = 16.dp),
                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {

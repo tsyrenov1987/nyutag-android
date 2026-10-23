@@ -225,7 +225,7 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
         if (roomID != null) onOpen(roomID) else problem = true
     }
 
-    FormPage(community.name, onClose) {
+    FormPage(community.name, onClose, closeTitle = words(P.close)) {
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Pillow(community.id, community.name.ifEmpty { "·" }, size = 76.dp, avatar = community.avatar)
             Text(community.name, color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)

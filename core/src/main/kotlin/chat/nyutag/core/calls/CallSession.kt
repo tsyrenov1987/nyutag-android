@@ -45,7 +45,7 @@ sealed class CallPhase {
 class CallEnvironment(
     val me: String,
     val deviceID: String,
-    /** Отправить сигнал в комнату (шифром, если комната шифрованная и сигнал не ring). */
+    /** Отправить сигнал в комнату (шифром комнаты, если сигнал не ring). */
     val post: suspend (CallSignal, String) -> Unit,
     val openTransport: suspend (String) -> CallTransport?,
     val makeVoice: () -> VoiceIO,

@@ -73,7 +73,7 @@ class Notices(private val context: Context, private val prefs: Prefs) {
         runCatching { manager.notify(preview.roomID, ID, notification) }
     }
 
-    /** Чат открыт: его уведомление больше не нужно. */
+    /** Чат прочитан: его уведомление больше не нужно. */
     fun clear(roomID: String) = manager.cancel(roomID, ID)
 
     private companion object {

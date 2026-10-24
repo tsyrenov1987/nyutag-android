@@ -52,9 +52,9 @@ class ChatFeedTest {
     private fun redaction(id: String, from: String, ts: Long, target: String): Event =
         Event(eventID = id, type = EventType.REDACTION, sender = from, originServerTS = ts, content = JsonValue.of("redacts" to target), roomID = room)
 
-    private fun prepared(): Store {
+    private fun prepared(encrypted: Boolean = true): Store {
         val store = Store(JdbcSql.inMemory())
-        store.upsert(RoomRecord(room, RoomRecord.Membership.JOIN))
+        store.upsert(RoomRecord(room, RoomRecord.Membership.JOIN, isEncrypted = encrypted))
         store.setState(member(me, "Я"))
         store.setState(member(arjuna, "Арюна"))
         return store
@@ -151,6 +151,17 @@ class ChatFeedTest {
         val answer = opened.first { it.id == "\$a" }
         assertEquals(FeedItem.Body.Text("ответ"), answer.body)
         assertEquals(FeedItem.Quote("\$s", "Арюна", PushPreview.Kind.Text("тайна")), answer.reply)
+    }
+
+    /** В открытой группе нерасшифрованное — сигнал звонка: в ленту не попадает. */
+    @Test fun openRoomHidesSealed() = runBlocking {
+        val store = prepared(encrypted = false)
+        store.append(listOf(
+            text("\$1", arjuna, 100, "сайн"),
+            Event(eventID = "\$s", type = EventType.ENCRYPTED, sender = arjuna, originServerTS = 110,
+                  content = JsonValue.of("algorithm" to "m.megolm.v1.aes-sha2"), roomID = room),
+        ))
+        assertEquals(listOf("\$1"), ChatFeed.items(room, store, me).map { it.id })
     }
 
     /** Нерасшифрованное до нашего входа — одной плашкой, после входа — как есть. */

@@ -31,7 +31,7 @@ class CallCenter(private val env: CallEnvironment) {
         session
     }
 
-    /** Групповой звонок в шифрованной комнате (ключи кадров идут шифром комнаты). `null` — уже идёт другой звонок. */
+    /** Групповой звонок в группе (ключи кадров идут шифром комнаты, даже открытой). `null` — уже идёт другой звонок. */
     suspend fun dialGroup(roomID: String): CallSession? = withContext(context) {
         if (activeHere() != null) return@withContext null
         val session = CallSession(CallID.make(), roomID, roomID, isCaller = true, video = false, group = true, env = env)

@@ -96,12 +96,16 @@ object ChatFeed {
         }
         fun name(userID: String): String = names[userID] ?: ChatDigest.localpart(userID)
 
+        // В открытой комнате шифром идут только сигналы звонка: нерасшифрованное там не реплика.
+        val sealedRoom = store.room(roomID)?.isEncrypted != false
         val opened = ArrayList<Event>()
         for (event in store.events(roomID, limit)) {
             val sender = event.sender
             if (sender != null && sender in ignored && event.type != EventType.MEMBER) continue
             if (event.type == EventType.ENCRYPTED && !event.isRedacted) {
-                opened.add(decrypt(event, roomID) ?: event)
+                val open = decrypt(event, roomID)
+                if (open == null && !sealedRoom) continue
+                opened.add(open ?: event)
             } else {
                 opened.add(event)
             }

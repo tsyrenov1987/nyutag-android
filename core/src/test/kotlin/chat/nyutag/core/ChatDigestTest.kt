@@ -149,7 +149,7 @@ class ChatDigestTest {
 
     @Test fun encryptedAndEdits() = runBlocking {
         val store = Store(JdbcSql.inMemory())
-        store.upsert(RoomRecord("!e", RoomRecord.Membership.JOIN))
+        store.upsert(RoomRecord("!e", RoomRecord.Membership.JOIN, isEncrypted = true))
         val sealed = Event(eventID = "\$s", type = EventType.ENCRYPTED, sender = arjuna, originServerTS = 300, content = JsonValue.of("algorithm" to "m.megolm.v1.aes-sha2"), roomID = "!e")
         val edit = Event(eventID = "\$x", type = EventType.MESSAGE, sender = arjuna, originServerTS = 310,
                          content = JsonValue.of("msgtype" to "m.text", "body" to "* правка", "m.relates_to" to JsonValue.of("rel_type" to "m.replace", "event_id" to "\$s")), roomID = "!e")
@@ -162,6 +162,16 @@ class ChatDigestTest {
         })
         assertEquals(PushPreview.Kind.Image, lines.first().last)
         assertEquals(300L, lines.first().lastTS)
+    }
+
+    /** В открытой группе нерасшифрованное — сигнал звонка: в списке его не видно. */
+    @Test fun openRoomHidesSealed() = runBlocking {
+        val store = Store(JdbcSql.inMemory())
+        store.upsert(RoomRecord("!o", RoomRecord.Membership.JOIN))
+        store.append(listOf(text("\$1", "!o", arjuna, 100, "сайн"),
+                            Event(eventID = "\$s", type = EventType.ENCRYPTED, sender = arjuna, originServerTS = 200,
+                                  content = JsonValue.of("algorithm" to "m.megolm.v1.aes-sha2"), roomID = "!o")))
+        assertEquals(PushPreview.Kind.Text("сайн"), ChatDigest.lines(store, me).first().last)
     }
 
     @Test fun orderingAndTitles() = runBlocking {

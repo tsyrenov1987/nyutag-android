@@ -955,13 +955,11 @@ class AppSession(context: Context, private val doors: DoorHub) {
         }
     }
 
-    /** Групповой — только в шифрованной комнате: ключи кадров идут шифром комнаты. */
+    /** Групповой — в любой группе: ключи кадров идут шифром комнаты и в открытой (см. `postSignal`). */
     suspend fun callKind(roomID: String): CallKind {
         val others = callMembers(roomID)
         if (others.size == 1) return CallKind.DIRECT
-        val account = account ?: return CallKind.NONE
-        val encrypted = withContext(Dispatchers.IO) { runCatching { account.store.room(roomID)?.isEncrypted }.getOrNull() } ?: false
-        return if (others.size > 1 && encrypted) CallKind.GROUP else CallKind.NONE
+        return if (others.size > 1) CallKind.GROUP else CallKind.NONE
     }
 
     private suspend fun callPeer(roomID: String): String? = callMembers(roomID).singleOrNull()
@@ -999,13 +997,16 @@ class AppSession(context: Context, private val doors: DoorHub) {
         calls.attach(CallCenter(env))
     }
 
-    /** Будильник идёт открытым всегда (по нему шлюз будит телефон пушем), остальное — как обычные события комнаты. */
+    /** Будильник идёт открытым всегда (по нему шлюз будит телефон пушем), остальное — шифром комнаты,
+     *  даже если сама комната открыта: в `call.join` лежит ключ кадров, серверу его видеть нельзя. */
     private suspend fun postSignal(signal: CallSignal, roomID: String): Boolean {
         val account = account ?: return false
         val sent = if (!signal.wantsRoomEncryption) {
             runCatching { account.client.send(roomID, signal.eventType, signal.content, TransactionID.make()) }.isSuccess
         } else {
-            post(signal.eventType, signal.content, roomID, TransactionID.make()) != null
+            val machine = machine
+            machine != null && runCatching { machine.sendEncrypted(roomID, signal.eventType, signal.content, TransactionID.make()) }
+                .onFailure { log("отправка ${signal.eventType} не прошла: $it") }.isSuccess
         }
         log("сигнал ${signal.eventType} ${if (sent) "ушёл" else "не ушёл"}")
         return sent

@@ -112,6 +112,8 @@ object ChatDigest {
                     shown = opened
                     kind = PushReader.kind(opened, me)
                 } else {
+                    // В открытой комнате шифром идут только сигналы звонка.
+                    if (!record.isEncrypted) continue
                     kind = PushPreview.Kind.Locked
                 }
             } else {

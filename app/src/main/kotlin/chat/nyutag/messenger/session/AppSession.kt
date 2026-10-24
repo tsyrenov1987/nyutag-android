@@ -793,10 +793,10 @@ class AppSession(context: Context, private val doors: DoorHub) {
         return ok
     }
 
-    /** Новая шифрованная группа с выбранными людьми. Возвращает id. */
+    /** Новая группа с выбранными людьми, без шифрования: новички видят историю. Возвращает id. */
     suspend fun createChat(name: String, members: List<String>): String? {
         val account = account ?: return null
-        val roomID = runCatching { account.client.createRoom(CreateRoom(name = name.trim(), invite = members)) }
+        val roomID = runCatching { account.client.createRoom(CreateRoom(name = name.trim(), invite = members, encrypted = false)) }
             .onFailure { log("группа не создана: $it") }.getOrNull() ?: return null
         log("группа создана, позвано ${members.size}")
         refresh()
@@ -1201,11 +1201,11 @@ class AppSession(context: Context, private val doors: DoorHub) {
         return spaceID
     }
 
-    /** Группа внутри сообщества: шифрованная комната, входят участники сообщества. Возвращает id. */
+    /** Группа внутри сообщества: без шифрования, чтобы вступившие видели историю; входят участники сообщества. Возвращает id. */
     suspend fun createGroup(name: String, spaceID: String): String? {
         val account = account ?: return null
         val server = server ?: return null
-        val roomID = runCatching { account.client.createRoom(CreateRoom(name = name)) }.getOrNull() ?: return null
+        val roomID = runCatching { account.client.createRoom(CreateRoom(name = name, encrypted = false)) }.getOrNull() ?: return null
         val rule = JsonValue.of("join_rule" to "restricted",
                                 "allow" to JsonValue.list(JsonValue.of("type" to "m.room_membership", "room_id" to spaceID)))
         try {

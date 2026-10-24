@@ -172,6 +172,7 @@ object P {
     val noticeRoomPhoto = Phrase(bxr = "Хөөрэлдөөнэй шэнэ зураг", ru = "Новое фото чата", en = "New chat photo")
     val noticeTopic = Phrase(bxr = "Тайлбари: {1}", ru = "Описание: {1}", en = "Description: {1}")
     val noticeEncrypted = Phrase(bxr = "Бэшэгүүд нюуса шифрээр хамгаалагдана", ru = "Сообщения защищены сквозным шифрованием", en = "Messages are end-to-end encrypted")
+    val noticeEarlierLocked = Phrase(bxr = "Таныг ороходо урдахи бэшэгүүд харагдахагүй: тэдэниие таныгүйгөөр шифрлэһэн", ru = "Сообщения до вашего вступления скрыты: их зашифровали без вас", en = "Messages from before you joined are hidden: they were encrypted without you")
     // Контакты
     val inNyutag = Phrase(bxr = "Нютагта", ru = "В Нютаге", en = "On Nyutag")
     val callToNyutag = Phrase(bxr = "Нютагта уриха", ru = "Позвать в Нютаг", en = "Invite to Nyutag")

@@ -820,6 +820,7 @@ private fun notice(notice: FeedItem.Notice, words: Words): String = when (notice
     is FeedItem.Notice.RoomPhoto -> words(P.noticeRoomPhoto)
     is FeedItem.Notice.RoomTopic -> words(P.noticeTopic, notice.topic)
     is FeedItem.Notice.EncryptionOn -> words(P.noticeEncrypted)
+    FeedItem.Notice.EarlierLocked -> words(P.noticeEarlierLocked)
 }
 
 @Composable

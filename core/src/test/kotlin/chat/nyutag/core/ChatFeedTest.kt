@@ -153,6 +153,33 @@ class ChatFeedTest {
         assertEquals(FeedItem.Quote("\$s", "Арюна", PushPreview.Kind.Text("тайна")), answer.reply)
     }
 
+    /** Нерасшифрованное до нашего входа — одной плашкой, после входа — как есть. */
+    @Test fun lockedBeforeJoin() = runBlocking {
+        val store = prepared()
+        fun sealed(id: String, ts: Long) = Event(eventID = id, type = EventType.ENCRYPTED, sender = arjuna, originServerTS = ts,
+                                                 content = JsonValue.of("algorithm" to "m.megolm.v1.aes-sha2"), roomID = room)
+        store.append(listOf(
+            text("\$0", arjuna, 90, "открыто"),
+            sealed("\$s1", 100), sealed("\$s2", 101),
+            member(me, "Я", id = "\$own", ts = 110),
+            sealed("\$s3", 120),
+        ))
+        val items = ChatFeed.items(room, store, me)
+        assertEquals(listOf("\$0", "\$s1", "\$own", "\$s3"), items.map { it.id })
+        assertEquals(FeedItem.Body.Notice(FeedItem.Notice.EarlierLocked), items[1].body)
+        assertEquals(FeedItem.Body.Locked, items[3].body)
+
+        // Ключ всё же пришёл (например, из резервной копии) — реплика видна.
+        val opened = ChatFeed.items(room, store, me, decrypt = { event, roomID ->
+            if (event.eventID == "\$s2") {
+                Event(eventID = "\$s2", type = EventType.MESSAGE, sender = event.sender, originServerTS = 101,
+                      content = JsonValue.of("msgtype" to "m.text", "body" to "тайна"), roomID = roomID)
+            } else null
+        })
+        assertEquals(FeedItem.Body.Text("тайна"), opened.first { it.id == "\$s2" }.body)
+        assertEquals(FeedItem.Body.Notice(FeedItem.Notice.EarlierLocked), opened.first { it.id == "\$s1" }.body)
+    }
+
     @Test fun replyQuotesEditedText() = runBlocking {
         val store = prepared()
         store.append(listOf(

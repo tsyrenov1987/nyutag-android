@@ -43,6 +43,8 @@ data class FeedItem(
         data class RoomPhoto(val by: String) : Notice()
         data class RoomTopic(val topic: String, val by: String) : Notice()
         data class EncryptionOn(val by: String) : Notice()
+        /** Реплики до нашего входа: ключ к ним раздали без нас, ждать его бесполезно. */
+        data object EarlierLocked : Notice()
     }
 
     sealed class Body {
@@ -148,18 +150,30 @@ object ChatFeed {
         // Вход создателя сразу после создания — та же новость, что «чат создан».
         val creator = opened.firstOrNull { it.type == EventType.CREATE }?.sender
 
+        // Наш последний вход в комнату: ключи к репликам до него раздавали без нас.
+        val joinedAt = opened.indexOfLast {
+            it.type == EventType.MEMBER && it.stateKey == me && it.content["membership"]?.string == "join" &&
+                it.unsigned?.at("prev_content", "membership")?.string != "join"
+        }
+        var hidLocked = false
+
         val readUpTo = othersReadTS(roomID, members, me, store)
         val byID = HashMap<String, Event>()
         for (event in opened) event.eventID?.let { byID[it] = event }
 
         val items = ArrayList<FeedItem>()
-        for (event in opened) {
+        for ((index, event) in opened.withIndex()) {
             var shownContent = event.content
             val id = event.eventID ?: continue
             val sender = event.sender ?: continue
             if (ChatDigest.isEdit(event)) continue
             val body: FeedItem.Body
-            if (event.isRedacted || id in removed) {
+            if (event.type == EventType.ENCRYPTED && !event.isRedacted && id !in removed && index < joinedAt) {
+                // Все такие реплики — одной плашкой на месте первой.
+                if (hidLocked) continue
+                hidLocked = true
+                body = FeedItem.Body.Notice(FeedItem.Notice.EarlierLocked)
+            } else if (event.isRedacted || id in removed) {
                 if (event.type != EventType.MESSAGE && event.type != EventType.ENCRYPTED && event.type != EventType.STICKER) continue
                 body = FeedItem.Body.Deleted
             } else if (event.type == EventType.ENCRYPTED) {

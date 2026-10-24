@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import chat.nyutag.core.rooms.ChatLine
+import chat.nyutag.core.rooms.CommunityLink
 import chat.nyutag.core.rooms.Person
 import chat.nyutag.core.rooms.PublicRoom
 import chat.nyutag.messenger.BuildConfig
@@ -184,7 +185,8 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val mine by session.communities.collectAsState()
-    val community = remember(spaceID, mine) { Community.find(spaceID, session) } ?: Community(spaceID, "")
+    var card by remember(spaceID) { mutableStateOf<Community?>(null) }
+    val community = remember(spaceID, mine) { Community.find(spaceID, session) } ?: card ?: Community(spaceID, "")
     val joined = mine.any { it.id == spaceID }
     var groups by remember { mutableStateOf<List<PublicRoom>?>(null) }
     var canAdd by remember { mutableStateOf(false) }
@@ -194,19 +196,36 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
     var leaving by remember { mutableStateOf(false) }
     var naming by remember { mutableStateOf(false) }
     var groupName by remember { mutableStateOf("") }
-    var people by remember { mutableStateOf<List<Person>?>(null) }
-    var admins by remember { mutableStateOf(emptySet<String>()) }
+    var facts by remember { mutableStateOf<AppSession.RoomFacts?>(null) }
+    var managing by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf<Person?>(null) }
+    var profile by remember { mutableStateOf<String?>(null) }
+    val revision by session.revision.collectAsState()
+    val me = session.me.orEmpty()
     var allPeople by remember { mutableStateOf(false) }
     var opening by remember { mutableStateOf<String?>(null) }
-    BackHandler(onBack = onClose)
-
-    LaunchedEffect(spaceID, joined) {
+    suspend fun loadGroups() {
         val found = session.communityGroups(spaceID)
         groups = found?.first ?: groups ?: emptyList()
         canAdd = found?.second ?: false
-        if (joined) session.communityPeople(spaceID)?.let { people = it.first; admins = it.second }
-        if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "сообщество: ${if (joined) "участник" else "гость"}, групп ${groups?.size}, добавлять ${if (canAdd) "можно" else "нельзя"}, людей ${people?.size}")
+        if (joined) session.facts(spaceID)?.let { facts = it }
     }
+    LaunchedEffect(spaceID, joined, revision) {
+        // По ссылке, а в каталоге его нет: название и правило входа спросим у сервера.
+        if (card == null && Community.find(spaceID, session) == null) card = session.communityCard(spaceID)?.let(Community::of)
+        loadGroups()
+        if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "сообщество: ${if (joined) "участник" else "гость"}, групп ${groups?.size}, добавлять ${if (canAdd) "можно" else "нельзя"}, людей ${facts?.roster?.joined?.size}")
+    }
+    profile?.let { PersonScreen(session, it) { profile = null }; return }
+    if (managing) {
+        RoomAdminScreen(session, spaceID, community = true, onClose = { managing = false }) { loadGroups() }
+        return
+    }
+    BackHandler(onBack = onClose)
+    val name = facts?.name?.ifEmpty { null } ?: community.name
+    val topic = facts?.topic ?: community.topic
+    val photo = facts?.avatarURL ?: community.avatar
+    val closed = facts?.isClosed ?: community.isClosed
 
     fun act(block: suspend () -> Unit) {
         if (busy) return
@@ -220,30 +239,34 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
     fun write() = act {
         val general = groups?.maxByOrNull { it.numJoinedMembers }
         val roomID = general?.roomID?.takeIf { session.joinGroup(it) }
-            ?: if (general == null && canAdd) session.createGroup(community.name.ifBlank { words(P.communityGeneralChat) }, spaceID)
+            ?: if (general == null && canAdd) session.createGroup(name.ifBlank { words(P.communityGeneralChat) }, spaceID)
                 ?.also { groups = session.communityGroups(spaceID)?.first ?: groups } else null
         if (roomID != null) onOpen(roomID) else problem = true
     }
 
-    FormPage(community.name, onClose, closeTitle = words(P.close)) {
+    FormPage(name, onClose, closeTitle = words(P.close)) {
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Pillow(community.id, community.name.ifEmpty { "·" }, size = 76.dp, avatar = community.avatar)
-            Text(community.name, color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-            community.topic?.takeIf { it.isNotEmpty() }?.let {
-                Text(it, color = palette.quiet, fontSize = 15.sp, textAlign = TextAlign.Center)
-            }
-            val badge = listOfNotNull(community.joinRule?.let { words(if (community.isClosed) P.communityClosed else P.communityOpen) },
-                                      community.members?.let { words(P.communityMembers, it.toString()) })
+            Pillow(community.id, name.ifEmpty { "·" }, size = 96.dp, avatar = photo)
+            Text(name, color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+            val count = facts?.roster?.joined?.size ?: community.members
+            val badge = listOfNotNull((facts != null || community.joinRule != null).takeIf { it }?.let { words(if (closed) P.communityClosed else P.communityOpen) },
+                                      count?.let { words(P.communityMembers, it.toString()) })
             if (badge.isNotEmpty()) Text(badge.joinToString(" · "), color = palette.quiet, fontSize = 13.sp)
+            topic?.takeIf { it.isNotEmpty() }?.let {
+                Text(it, color = palette.ink, fontSize = 15.sp, textAlign = TextAlign.Center)
+            }
             if (joined) {
                 Box(Modifier.padding(top = 4.dp, start = 40.dp, end = 40.dp)) {
                     BigButton(words(P.communityWrite), busy, enabled = !busy && (groups?.isNotEmpty() == true || canAdd)) { write() }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Pill(words(P.communityInvite), palette.plate, palette.sky) {
-                        share(context, words(P.communityInviteText, community.name))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    RoundAction(words(P.communityInvite), "＋", Modifier.weight(1f)) {
+                        share(context, words(P.communityInviteText, name, CommunityLink.web(spaceID)))
                     }
-                    Pill(words(P.communityLeave), palette.plate, palette.quiet) { leaving = true }
+                    if (facts?.let { canManage(it.powers, me) } == true) {
+                        RoundAction(words(P.manage), "⚙", Modifier.weight(1f), badge = facts?.roster?.knocking?.size ?: 0) { managing = true }
+                    }
+                    RoundAction(words(P.communityLeave), "⇥", Modifier.weight(1f), tint = palette.quiet) { leaving = true }
                 }
             } else if (!requested) {
                 Box(Modifier.padding(top = 4.dp, start = 40.dp, end = 40.dp)) {
@@ -297,13 +320,14 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
         }
         if (joined && !groups.isNullOrEmpty()) Text(words(P.communityGroupsHint), color = palette.quiet, fontSize = 13.sp,
                                                     modifier = Modifier.padding(horizontal = 8.dp))
-        val list = people
+        val list = facts?.let(::byRole)
         if (joined && !list.isNullOrEmpty()) {
             Text(words(P.communityPeople, list.size.toString()).uppercase(), color = palette.quiet, fontSize = 13.sp,
                  fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 8.dp, top = 8.dp))
-            // Нажатие — личный чат с человеком; себя не открываем.
+            // Нажатие — меню, если права позволяют, иначе личный чат с человеком; себя не открываем.
             for (person in if (allPeople) list else list.take(8)) {
-                PersonRow(person, opening == person.userID, if (person.userID in admins) words(P.communityAdmin) else null) {
+                PersonRow(person, opening == person.userID, roleNote(facts?.powers, person.userID, words)) {
+                    if (memberHasActions(facts?.powers, me, person.userID)) { menu = person; return@PersonRow }
                     if (person.userID == session.me || opening != null) return@PersonRow
                     opening = person.userID
                     scope.launch {
@@ -320,6 +344,11 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
         }
     }
 
+    val powers = facts?.powers
+    menu?.let { target ->
+        if (powers != null) MemberMenu(session, spaceID, powers, community = true, person = target, onDismiss = { menu = null },
+                                       onProfile = { menu = null; profile = it }) { loadGroups() }
+    }
     if (leaving) {
         AlertDialog({ leaving = false },
                     confirmButton = {
@@ -412,11 +441,4 @@ private fun LazyListScope.header(title: String) {
         Text(title.uppercase(), color = LocalPalette.current.quiet, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
              modifier = Modifier.padding(start = 8.dp, top = 8.dp))
     }
-}
-
-@Composable
-private fun Pill(title: String, background: androidx.compose.ui.graphics.Color, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
-    Text(title, color = color, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-         modifier = Modifier.clip(RoundedCornerShape(50)).background(background).clickable(onClick = onClick)
-             .padding(horizontal = 18.dp, vertical = 10.dp))
 }

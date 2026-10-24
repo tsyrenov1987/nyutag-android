@@ -29,6 +29,8 @@ data class ChatLine(
     val lastTS: Long,
     val unread: Int,
     val mentions: Int,
+    /** Имя сообщества, в которое входит группа (`m.space.parent`), если мы в нём состоим. */
+    val community: String? = null,
 ) {
     /** Судьба своей последней реплики (галочки в списке): дошла до сервера или её уже прочитали. */
     enum class Delivery { NONE, SENT, READ }
@@ -166,12 +168,24 @@ object ChatDigest {
         if (lastEvent != null && sender == me) {
             delivery = if (isRead(lastEvent, record.id, members, me, store)) ChatLine.Delivery.READ else ChatLine.Delivery.SENT
         }
+        var community: String? = null
+        if (!record.isSpace && !record.isDirect) {
+            for (parent in store.stateAll(record.id, "m.space.parent")) {
+                if (parent.content["via"] == null) continue
+                val space = store.room(parent.stateKey) ?: continue
+                val spaceName = space.name
+                if (space.membership == RoomRecord.Membership.JOIN && !spaceName.isNullOrEmpty()) {
+                    community = spaceName
+                    break
+                }
+            }
+        }
         return ChatLine(
             id = record.id, title = title, avatarURL = avatarURL, membership = record.membership,
             isDirect = record.isDirect, isEncrypted = record.isEncrypted, isSpace = record.isSpace,
             last = last, lastSenderName = sender?.let { name(it) }, lastIsMine = sender == me, delivery = delivery,
             lastTS = lastEvent?.originServerTS ?: record.latestTS,
-            unread = unread, mentions = record.highlightCount,
+            unread = unread, mentions = record.highlightCount, community = community,
         )
     }
 

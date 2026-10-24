@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import chat.nyutag.core.calls.CallPhase
+import chat.nyutag.core.rooms.CommunityLink
 import chat.nyutag.messenger.session.AppSession
 import chat.nyutag.messenger.ui.CallScreen
 import chat.nyutag.messenger.ui.CallStrip
@@ -54,6 +55,8 @@ class MainActivity : ComponentActivity() {
     /** Чат из нажатого уведомления: откроется, как только вход поднимется. */
     private val pushedRoom = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val calendarAsked = kotlinx.coroutines.flow.MutableStateFlow(false)
+    /** Сообщество по ссылке `nyutag.chat/c/#…` или `nyutag://community/…`. */
+    private val linkedCommunity = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     /** Чат на экране; сессии он нужен, только пока окно видно. */
     private var shownRoom: String? = null
     private var visible = false
@@ -67,6 +70,7 @@ class MainActivity : ComponentActivity() {
         val wallpapers = Wallpapers(applicationContext)
         pushedRoom.value = intent?.getStringExtra(OPEN_ROOM)
         calendarAsked.value = intent?.getBooleanExtra(OPEN_CALENDAR, false) == true
+        linkedCommunity.value = intent?.dataString?.let(CommunityLink::roomID)
         setContent {
             NyutagTheme {
                 CompositionLocalProvider(LocalWords provides words, LocalAvatars provides session,
@@ -96,6 +100,16 @@ class MainActivity : ComponentActivity() {
                         community = null
                         tab = 3
                         calendarAsked.value = false
+                    }
+                    // Ссылка на сообщество: вкладка «Сообщества» и его экран (там же вступить или подать заявку).
+                    val linked by linkedCommunity.collectAsState()
+                    LaunchedEffect(linked, phase) {
+                        val id = linked ?: return@LaunchedEffect
+                        if (phase != AppSession.Phase.SIGNED_IN) return@LaunchedEffect
+                        openRoom = null
+                        tab = 2
+                        community = id
+                        linkedCommunity.value = null
                     }
                     // Виджет пишет на языке приложения: сменили язык — перерисовать, заодно и новый день при запуске.
                     LaunchedEffect(words.lang, words.buryatLetters) { ZurkhaiWidget.refresh(applicationContext) }
@@ -154,6 +168,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         intent.getStringExtra(OPEN_ROOM)?.let { pushedRoom.value = it }
         if (intent.getBooleanExtra(OPEN_CALENDAR, false)) calendarAsked.value = true
+        intent.dataString?.let(CommunityLink::roomID)?.let { linkedCommunity.value = it }
     }
 
     override fun onStart() {

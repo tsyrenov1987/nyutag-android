@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -68,6 +70,8 @@ import androidx.compose.ui.unit.sp
 import chat.nyutag.core.rooms.AutoDelete
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.rooms.FeedItem
+import chat.nyutag.core.rooms.PinnedEvents
+import chat.nyutag.core.rooms.RoomPowers
 import chat.nyutag.core.rooms.TransactionID
 import chat.nyutag.messenger.BuildConfig
 import android.widget.Toast
@@ -145,6 +149,7 @@ private sealed class Action {
     object Report : Action()
     data class React(val key: String) : Action()
     object SaveSticker : Action()
+    data class Pin(val on: Boolean) : Action()
 }
 
 /** Быстрые реакции в меню, по порядку, как на iOS. */
@@ -213,6 +218,23 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
     DisposableEffect(roomID) { onDispose { recorder.cancel(); VoicePlayer.stop() } }
     // Звонить можно один на один и в шифрованную группу; состав комнаты меняется синхронизацией.
     val callKind by produceState(AppSession.CallKind.NONE, roomID, revision) { value = session.callKind(roomID) }
+    // Права в группе (из своей базы) и закреплённые реплики; `pinIndex` — какую из закреплённых показывает плашка.
+    val isGroup = line?.isDirect == false && !isSaved
+    var powers by remember(roomID) { mutableStateOf<RoomPowers?>(null) }
+    var pinnedIDs by remember(roomID) { mutableStateOf<List<String>>(emptyList()) }
+    var pinIndex by remember(roomID) { mutableStateOf(0) }
+    LaunchedEffect(roomID, revision, isGroup) {
+        if (!isGroup) return@LaunchedEffect
+        val (local, pinned) = session.localPowers(roomID) ?: return@LaunchedEffect
+        powers = local
+        if (pinned != pinnedIDs) { pinnedIDs = pinned; pinIndex = 0 }
+    }
+    val me = session.me.orEmpty()
+    // Удалять чужие реплики и закреплять: модератор и выше в группе.
+    val moderates = isGroup && powers?.canRedactOthers(me) == true
+    val mayPin = isGroup && powers?.canSetState(me, PinnedEvents.TYPE) == true
+    // «Пишут только админы», а мы не админ: вместо поля ввода — подпись.
+    val readOnly = isGroup && powers?.canSend(me) == false
 
     LaunchedEffect(roomID, revision, limit, expiryTick, settingRule) {
         val stored = session.autoDelete(roomID)
@@ -445,6 +467,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                 run("стикер в мои") { session.addSticker(sticker) != null }
             }
             is Action.React -> run("реакция ${action.key}") { session.toggleReaction(roomID, item, action.key) }
+            is Action.Pin -> run("закреп ${action.on}") { session.pin(item.id, action.on, roomID) }
         }
     }
 
@@ -519,6 +542,16 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             }
         }
         LaunchedEffect(flash) { if (flash != null) { delay(1600); flash = null } }
+        if (isGroup && pinnedIDs.isNotEmpty()) {
+            val shown = pinIndex.coerceAtMost(pinnedIDs.size - 1)
+            val id = pinnedIDs[shown]
+            PinnedBar(title = if (pinnedIDs.size > 1) "${words(P.pinnedMessage)} · ${shown + 1}/${pinnedIDs.size}" else words(P.pinnedMessage),
+                      text = items.firstOrNull { it.id == id }?.let { summary(it, words) } ?: "…") {
+                // Нажатие — к реплике (она подгрузится, если далеко) и на следующую закреплённую.
+                focus = id
+                pinIndex = (shown + 1) % pinnedIDs.size
+            }
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
         WallpaperBackground(roomID, Modifier.matchParentSize())
         LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true,
@@ -529,7 +562,8 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
                 when (row) {
                     is Row.Plate -> Plate(row.text)
                     is Row.Bubble -> Bubble(session, row, busy = row.item != null && row.item.id == openingID,
-                                            seen = row.item != null && row.item.id in seenOnce, onRetry = {
+                                            seen = row.item != null && row.item.id in seenOnce, moderates = moderates,
+                                            pinned = if (mayPin && row.item != null) row.item.id in pinnedIDs else null, onRetry = {
                         row.retry?.let { (tx, text) -> send(text, tx, retry = outbox.firstOrNull { it.transactionID == tx }) }
                     }, onOpen = { row.item?.let(::open) }, onAction = { action -> row.item?.let { act(action, it) } })
                 }
@@ -543,7 +577,10 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             ComposerBanner(item.senderName, summary(item, words)) { replyTo = null }
         }
         val old = (editing?.body as? FeedItem.Body.Text)?.text
-        if (recording) {
+        if (readOnly) {
+            Text("📣 " + words(P.onlyAdminsComposer), color = palette.quiet, fontSize = 14.sp, textAlign = TextAlign.Center,
+                 modifier = Modifier.fillMaxWidth().background(palette.card).padding(vertical = 16.dp, horizontal = 12.dp))
+        } else if (recording) {
             VoiceBar(recorded, onCancel = { recorder.cancel(); recording = false }, onSend = {
                 recording = false
                 recorder.finish()?.let(::queue)
@@ -591,7 +628,7 @@ fun ChatScreen(session: AppSession, roomID: String, onBack: () -> Unit) {
             replyTo = null
             send(text, reply = reply)
         })
-        if (stickersOpen && !recording) {
+        if (stickersOpen && !recording && !readOnly) {
             BackHandler { stickersOpen = false }
             StickerPanel(session, revision, onPick = { sticker, soyombo -> stickersOpen = false; queueSticker(sticker, soyombo) },
                          onAdd = { pickSticker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
@@ -833,7 +870,7 @@ private fun Plate(text: String) {
 }
 
 @Composable
-private fun Bubble(session: AppSession, row: Row.Bubble, busy: Boolean, seen: Boolean, onRetry: () -> Unit, onOpen: () -> Unit,
+private fun Bubble(session: AppSession, row: Row.Bubble, busy: Boolean, seen: Boolean, moderates: Boolean, pinned: Boolean?, onRetry: () -> Unit, onOpen: () -> Unit,
                    onAction: (Action) -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
@@ -888,7 +925,7 @@ private fun Bubble(session: AppSession, row: Row.Bubble, busy: Boolean, seen: Bo
                     if (row.mine) Ticks(row.delivery, color = if (sticker) palette.quiet else quiet, readColor = if (sticker) palette.sky else palette.readOnBlue)
                 }
             }
-            row.item?.let { item -> MessageMenu(menu, item, { menu = false }) { menu = false; onAction(it) } }
+            row.item?.let { item -> MessageMenu(menu, item, moderates, pinned, { menu = false }) { menu = false; onAction(it) } }
         }
         if (row.reactions.isNotEmpty()) {
             Row(Modifier.padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -991,7 +1028,7 @@ private fun VoiceBar(elapsed: Int, onCancel: () -> Unit, onSend: () -> Unit) {
 
 /** Меню долгого нажатия: ряд быстрых реакций, ниже действия. */
 @Composable
-private fun MessageMenu(expanded: Boolean, item: FeedItem, onDismiss: () -> Unit, onAction: (Action) -> Unit) {
+private fun MessageMenu(expanded: Boolean, item: FeedItem, moderates: Boolean, pinned: Boolean?, onDismiss: () -> Unit, onAction: (Action) -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     DropdownMenu(expanded, onDismiss) {
@@ -1013,7 +1050,10 @@ private fun MessageMenu(expanded: Boolean, item: FeedItem, onDismiss: () -> Unit
         }
         if (item.canForward) DropdownMenuItem({ Text(words(P.forward)) }, { onAction(Action.Forward) })
         if (item.canEdit) DropdownMenuItem({ Text(words(P.editAction)) }, { onAction(Action.Edit) })
-        if (item.canDelete) DropdownMenuItem({ Text(words(P.deleteAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Delete) })
+        if (pinned != null && !item.isNotice && item.body != FeedItem.Body.Deleted)
+            DropdownMenuItem({ Text(words(if (pinned) P.unpinAction else P.pinAction)) }, { onAction(Action.Pin(!pinned)) })
+        // Модератор удаляет и чужие реплики.
+        if (item.canDelete || (moderates && !item.isNotice && item.body != FeedItem.Body.Deleted)) DropdownMenuItem({ Text(words(P.deleteAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Delete) })
         if (item.canReport) DropdownMenuItem({ Text(words(P.reportAction), color = Color(0xFFD03A2F)) }, { onAction(Action.Report) })
     }
 }
@@ -1030,6 +1070,22 @@ private fun ComposerBanner(title: String, text: String, onClose: () -> Unit) {
             Text(text, color = palette.quiet, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Text("✕", color = palette.quiet, fontSize = 16.sp, modifier = Modifier.clip(CircleShape).clickable(onClick = onClose).padding(12.dp))
+    }
+}
+
+/** Плашка закреплённого над лентой, как в Telegram. */
+@Composable
+private fun PinnedBar(title: String, text: String, onClick: () -> Unit) {
+    val palette = LocalPalette.current
+    Row(Modifier.fillMaxWidth().background(palette.card).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(3.dp).height(34.dp).clip(RoundedCornerShape(2.dp)).background(palette.sky))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = palette.sky, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(text, color = palette.ink, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text("📌", fontSize = 13.sp)
     }
 }
 

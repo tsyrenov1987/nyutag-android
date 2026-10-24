@@ -77,6 +77,8 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val lines by session.lines.collectAsState()
+    // «Избранное» читается из базы: один раз на обновление списка, а не на каждую строку.
+    val savedID = remember(lines) { session.savedRoomID }
     val typing by session.typing.collectAsState()
     val layout by session.layout.collectAsState()
     val mutedRooms by session.mutedRooms.collectAsState()
@@ -137,7 +139,7 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
                     var menu by remember { mutableStateOf(false) }
                     Box {
                         ChatRow(line, typing[line.id], words, pinned = layout.isPinned(line.id), muted = line.id in mutedRooms,
-                                onLongClick = { menu = true }) { onOpen(line.id) }
+                                saved = line.id == savedID, onLongClick = { menu = true }) { onOpen(line.id) }
                         RowMenu(menu, { menu = false }, line.id, layout, line.id in mutedRooms,
                                 onPin = { session.setPinned(line.id, it) },
                                 onPlace = { id, inside -> session.place(line.id, id, inside) },
@@ -313,7 +315,7 @@ private fun SearchHeader(title: String) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ChatRow(line: ChatLine, typingIDs: List<String>?, words: Words, pinned: Boolean = false, muted: Boolean = false,
-                     onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+                     saved: Boolean = false, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     val palette = LocalPalette.current
     val typing = typingIDs?.firstOrNull()?.let { if (line.isDirect) words(P.typingNow) else words(P.typingName, ChatDigest.localpart(it)) }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card)
@@ -326,6 +328,11 @@ internal fun ChatRow(line: ChatLine, typingIDs: List<String>?, words: Words, pin
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(line.title.ifEmpty { words(P.emptyChat) }, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                          maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    // Группа или чат сообщества: значок, чтобы не путать с личным.
+                    if (!line.isDirect && !saved) {
+                        val badge = words(if (line.community == null) P.groupBadge else P.communityBadge)
+                        Text(if (line.community == null) "👥" else "🏛", fontSize = 11.sp, modifier = Modifier.semantics { contentDescription = badge })
+                    }
                     if (line.isEncrypted) LockMark(palette.quiet)
                     if (muted) Text("🔕", fontSize = 11.sp, modifier = Modifier.semantics { contentDescription = words(P.muted) })
                     if (pinned) Text("📌", fontSize = 11.sp, modifier = Modifier.semantics { contentDescription = words(P.pinned) })
@@ -334,6 +341,10 @@ internal fun ChatRow(line: ChatLine, typingIDs: List<String>?, words: Words, pin
                 if (line.lastTS > 0) {
                     Text(time(line.lastTS, words), color = if (line.unread > 0) palette.gold else palette.quiet, fontSize = 12.sp)
                 }
+            }
+            line.community?.takeIf { it != line.title }?.let { community ->
+                Text(community, color = palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                     overflow = TextOverflow.Ellipsis)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(typing ?: preview(line, words), color = if (typing == null) palette.quiet else palette.sky, fontSize = 15.sp,

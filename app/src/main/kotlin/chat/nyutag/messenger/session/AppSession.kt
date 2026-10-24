@@ -76,11 +76,17 @@ import chat.nyutag.core.rooms.devices
 import chat.nyutag.core.rooms.dropForgotten
 import chat.nyutag.core.rooms.event
 import chat.nyutag.core.rooms.join
-import chat.nyutag.core.rooms.joinedMembers
 import chat.nyutag.core.rooms.knock
 import chat.nyutag.core.rooms.leave
 import chat.nyutag.core.rooms.publicCommunities
 import chat.nyutag.core.rooms.redact
+import chat.nyutag.core.rooms.ban
+import chat.nyutag.core.rooms.unban
+import chat.nyutag.core.rooms.kick
+import chat.nyutag.core.rooms.members
+import chat.nyutag.core.rooms.PinnedEvents
+import chat.nyutag.core.rooms.RoomPowers
+import chat.nyutag.core.rooms.Roster
 import chat.nyutag.core.rooms.report
 import chat.nyutag.core.rooms.setIgnoredUsers
 import chat.nyutag.core.rooms.renameDevice
@@ -1150,14 +1156,11 @@ class AppSession(context: Context, private val doors: DoorHub) {
         return groups to (creator || (power != null && mine >= needed))
     }
 
-    /** Участники сообщества (вместе с собой) и кто из них админ; `null` — не узнали. */
-    suspend fun communityPeople(spaceID: String): Pair<List<Person>, Set<String>>? {
+    /** Карточка сообщества, которого нет ни в каталоге, ни у нас (открыли по ссылке): название, фото, правило входа. */
+    suspend fun communityCard(spaceID: String): PublicRoom? {
         val account = account ?: return null
-        val people = runCatching { account.client.joinedMembers(spaceID) }.getOrNull() ?: return null
-        val power = runCatching { account.client.state(spaceID, "m.room.power_levels") }.getOrNull()
-        val admins = runCatching { account.client.creators(spaceID) }.getOrDefault(emptySet()) +
-            power?.get("users")?.obj.orEmpty().filter { (it.value.int ?: 0) >= 100 }.keys
-        return people to admins
+        val page = runCatching { account.client.roomHierarchy(spaceID, maxDepth = 0) }.onFailure { log("карточка сообщества: $it") }.getOrNull()
+        return page?.rooms?.map { it.room }?.firstOrNull { it.roomID == spaceID }
     }
 
     /** Открытое — вступаем сразу, закрытое (`knock`) — подаём заявку. */
@@ -1225,6 +1228,142 @@ class AppSession(context: Context, private val doors: DoorHub) {
         val account = account ?: return false
         if (linesFlow.value.any { it.id == roomID && it.membership == RoomRecord.Membership.JOIN }) return true
         return runCatching { account.client.join(roomID, listOfNotNull(server)) }.isSuccess
+    }
+
+    // MARK: Управление группой и сообществом
+
+    /** Всё, что нужно экрану управления: права, состав, оформление, правило входа, закреплённое. */
+    data class RoomFacts(
+        val powers: RoomPowers,
+        val roster: Roster,
+        val name: String = "",
+        val topic: String = "",
+        val avatarURL: String? = null,
+        val joinRule: String = "invite",
+        val pinned: List<String> = emptyList(),
+    ) {
+        val isClosed: Boolean get() = joinRule == "knock"
+    }
+
+    /** Права и состав комнаты прямо с сервера (в базе может не быть заявок и блокировок). `null` — не вышло. */
+    suspend fun facts(roomID: String): RoomFacts? {
+        val account = account ?: return null
+        val powers = powers(roomID) ?: return null
+        val members = runCatching { account.client.members(roomID, notMembership = null) }.getOrNull() ?: return null
+        suspend fun content(type: String): JsonValue? = runCatching { account.client.state(roomID, type) }.getOrNull()
+        return RoomFacts(
+            powers = powers,
+            roster = Roster(members),
+            name = content(EventType.NAME)?.get("name")?.string.orEmpty(),
+            topic = content(EventType.TOPIC)?.get("topic")?.string.orEmpty(),
+            avatarURL = content(EventType.AVATAR)?.get("url")?.string?.ifEmpty { null },
+            joinRule = content(EventType.JOIN_RULES)?.get("join_rule")?.string ?: "invite",
+            pinned = PinnedEvents.ids(content(PinnedEvents.TYPE)),
+        )
+    }
+
+    /** Уровни комнаты вместе с создателями; без события уровней — пустые (всё по умолчанию). */
+    suspend fun powers(roomID: String): RoomPowers? {
+        val account = account ?: return null
+        val creators = runCatching { account.client.creators(roomID) }.getOrNull() ?: return null
+        val levels = runCatching { account.client.state(roomID, EventType.POWER_LEVELS) }.getOrNull()
+        return RoomPowers(levels, creators)
+    }
+
+    /** Права и закреплённое из своей базы: для чата, который пересобирается на каждом обновлении. */
+    suspend fun localPowers(roomID: String): Pair<RoomPowers, List<String>>? {
+        val account = account ?: return null
+        return withContext(Dispatchers.IO) {
+            runCatching { RoomPowers.local(roomID, account.store) to PinnedEvents.ids(account.store.state(roomID, PinnedEvents.TYPE)) }.getOrNull()
+        }
+    }
+
+    private suspend fun setRoomState(roomID: String, type: String, content: JsonValue): Boolean {
+        val account = account ?: return false
+        if (runCatching { account.client.setState(roomID, type, content = content) }.onFailure { log("управление: $type не записано: $it") }.isFailure) return false
+        log("управление: $type записано")
+        refresh()
+        return true
+    }
+
+    suspend fun setRoomName(name: String, roomID: String): Boolean {
+        val clean = name.trim()
+        if (clean.isEmpty()) return false
+        return setRoomState(roomID, EventType.NAME, JsonValue.of("name" to clean))
+    }
+
+    suspend fun setRoomTopic(topic: String, roomID: String): Boolean =
+        setRoomState(roomID, EventType.TOPIC, JsonValue.of("topic" to topic.trim()))
+
+    /** Фото группы: квадратный JPEG на сервер и в `m.room.avatar`; `null` — убрать фото. */
+    suspend fun setRoomPhoto(jpeg: ByteArray?, roomID: String): Boolean {
+        val account = account ?: return false
+        if (jpeg == null) return setRoomState(roomID, EventType.AVATAR, JsonValue.Obj(emptyMap()))
+        val mxc = runCatching { account.client.uploadMedia(jpeg, "image/jpeg", "room.jpg") }.getOrNull() ?: return false
+        runCatching { media?.store(jpeg, mxc) }
+        return setRoomState(roomID, EventType.AVATAR, JsonValue.of("url" to mxc.toString()))
+    }
+
+    /** Назначить или снять админа. Уровни берём свежими: иначе затрём чужое назначение, сделанное только что. */
+    suspend fun setLevel(userID: String, level: Long, roomID: String): Boolean {
+        val me = me ?: return false
+        val powers = powers(roomID) ?: return false
+        if (!powers.canSetLevel(me, userID, level)) return false
+        return setRoomState(roomID, EventType.POWER_LEVELS, powers.setting(userID, level))
+    }
+
+    suspend fun setOnlyAdminsWrite(on: Boolean, roomID: String): Boolean {
+        val powers = powers(roomID) ?: return false
+        return setRoomState(roomID, EventType.POWER_LEVELS, powers.writing(onlyAdmins = on))
+    }
+
+    /** Сообщество открытое (входят сразу) или закрытое (по заявке). */
+    suspend fun setClosed(closed: Boolean, spaceID: String): Boolean =
+        setRoomState(spaceID, EventType.JOIN_RULES, JsonValue.of("join_rule" to if (closed) "knock" else "public"))
+
+    /** Группы сообщества, где можно навести порядок вслед за сообществом. */
+    private suspend fun childRooms(spaceID: String): List<String> {
+        val account = account ?: return emptyList()
+        val page = runCatching { account.client.roomHierarchy(spaceID, maxDepth = 1) }.getOrNull() ?: return emptyList()
+        return page.rooms.map { it.room }.filter { it.roomID != spaceID && !it.isSpace }.map { it.roomID }
+    }
+
+    /** Удалить из группы. Из сообщества — заодно из его групп: иначе человек остаётся в общем чате. */
+    suspend fun remove(userID: String, roomID: String, community: Boolean): Boolean {
+        val account = account ?: return false
+        if (runCatching { account.client.kick(roomID, userID) }.isFailure) return false
+        if (community) for (child in childRooms(roomID)) runCatching { account.client.kick(child, userID) }
+        return true
+    }
+
+    /** Заблокировать: вернуться сам не сможет. В сообществе — и во всех его группах. */
+    suspend fun ban(userID: String, roomID: String, community: Boolean): Boolean {
+        val account = account ?: return false
+        if (runCatching { account.client.ban(roomID, userID) }.isFailure) return false
+        if (community) for (child in childRooms(roomID)) runCatching { account.client.ban(child, userID) }
+        return true
+    }
+
+    suspend fun unban(userID: String, roomID: String, community: Boolean): Boolean {
+        val account = account ?: return false
+        if (runCatching { account.client.unban(roomID, userID) }.isFailure) return false
+        if (community) for (child in childRooms(roomID)) runCatching { account.client.unban(child, userID) }
+        return true
+    }
+
+    /** Заявка в закрытое сообщество: одобрить — пригласить (на нашем сервере вход примется сам), отклонить — отказ. */
+    suspend fun answerRequest(userID: String, spaceID: String, accept: Boolean): Boolean {
+        val account = account ?: return false
+        return runCatching {
+            if (accept) account.client.invite(spaceID, userID) else account.client.kick(spaceID, userID)
+        }.isSuccess
+    }
+
+    /** Закрепить или открепить реплику: новое закреплённое — первым. */
+    suspend fun pin(eventID: String, pinned: Boolean, roomID: String): Boolean {
+        val account = account ?: return false
+        val now = runCatching { account.client.state(roomID, PinnedEvents.TYPE) }.getOrNull()
+        return setRoomState(roomID, PinnedEvents.TYPE, PinnedEvents.pinning(eventID, pinned, now))
     }
 
     // MARK: Избранное

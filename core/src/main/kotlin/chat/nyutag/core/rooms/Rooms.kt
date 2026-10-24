@@ -169,6 +169,16 @@ suspend fun MatrixClient.kick(roomID: String, userID: String, reason: String? = 
     request(Method.POST, "rooms/$roomID/kick", body = JsonValue.Obj(body))
 }
 
+suspend fun MatrixClient.ban(roomID: String, userID: String, reason: String? = null) {
+    val body = linkedMapOf<String, JsonValue>("user_id" to JsonValue.Str(userID))
+    if (reason != null) body["reason"] = JsonValue.Str(reason)
+    request(Method.POST, "rooms/$roomID/ban", body = JsonValue.Obj(body))
+}
+
+suspend fun MatrixClient.unban(roomID: String, userID: String) {
+    request(Method.POST, "rooms/$roomID/unban", body = JsonValue.of("user_id" to userID))
+}
+
 /** Полный список участников (для отправки ключей Megolm нужны все устройства joined и invited). */
 suspend fun MatrixClient.members(roomID: String, notMembership: String? = "leave"): List<Event> {
     val query = if (notMembership != null) mapOf("not_membership" to notMembership) else emptyMap()

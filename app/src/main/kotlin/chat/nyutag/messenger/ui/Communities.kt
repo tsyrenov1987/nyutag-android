@@ -220,7 +220,7 @@ fun CommunityScreen(session: AppSession, spaceID: String, onClose: () -> Unit, o
     fun write() = act {
         val general = groups?.maxByOrNull { it.numJoinedMembers }
         val roomID = general?.roomID?.takeIf { session.joinGroup(it) }
-            ?: if (general == null && canAdd) session.createGroup(words(P.communityGeneralChat), spaceID)
+            ?: if (general == null && canAdd) session.createGroup(community.name.ifBlank { words(P.communityGeneralChat) }, spaceID)
                 ?.also { groups = session.communityGroups(spaceID)?.first ?: groups } else null
         if (roomID != null) onOpen(roomID) else problem = true
     }
@@ -393,7 +393,7 @@ fun NewCommunityScreen(session: AppSession, onClose: () -> Unit, onCreated: (Str
         BigButton(words(P.communityCreate), busy, enabled = name.isNotBlank() && !busy) {
             busy = true
             scope.launch {
-                val id = session.createCommunity(name.trim(), about, open, words(P.communityGeneralChat))
+                val id = session.createCommunity(name.trim(), about, open, name.trim())
                 busy = false
                 if (id == null) problem = true else onCreated(id)
             }

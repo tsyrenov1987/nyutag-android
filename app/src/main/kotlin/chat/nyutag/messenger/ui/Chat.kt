@@ -7,6 +7,7 @@ package chat.nyutag.messenger.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.util.Patterns
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,7 +54,13 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import chat.nyutag.core.nyutag.BuryatLetters
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -833,6 +840,24 @@ private fun layout(items: List<FeedItem>, outbox: List<Outgoing>, line: ChatLine
     return rows
 }
 
+/** Ссылки и адреса в тексте реплики: подчёркнуты и открываются касанием. */
+private fun linked(text: String): AnnotatedString {
+    if ('.' !in text) return AnnotatedString(text)
+    val style = TextLinkStyles(SpanStyle(textDecoration = TextDecoration.Underline))
+    return buildAnnotatedString {
+        append(text)
+        val matcher = Patterns.WEB_URL.matcher(text)
+        while (matcher.find()) {
+            var end = matcher.end()
+            while (end > matcher.start() && text[end - 1] in ".,;:!?)»\"'") end--
+            val found = text.substring(matcher.start(), end)
+            if (matcher.start() > 0 && text[matcher.start() - 1] == '@') continue
+            val url = if (found.contains("://")) found else "https://$found"
+            addLink(LinkAnnotation.Url(url, style), matcher.start(), end)
+        }
+    }
+}
+
 private fun clock(ts: Long): String =
     Instant.ofEpochMilli(ts).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
 
@@ -916,7 +941,7 @@ private fun Bubble(session: AppSession, row: Row.Bubble, busy: Boolean, seen: Bo
                         else -> FileChip(media.name, media.size, ink, quiet, busy)
                     }
                 }
-                if (row.text.isNotEmpty()) Text(row.text, color = if (row.muted) quiet else ink, fontSize = 16.sp,
+                if (row.text.isNotEmpty()) Text(if (row.muted) AnnotatedString(row.text) else linked(row.text), color = if (row.muted) quiet else ink, fontSize = 16.sp,
                      fontStyle = if (row.muted) androidx.compose.ui.text.font.FontStyle.Italic else null)
                 Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (row.edited) Text(words(P.edited), color = quiet, fontSize = 11.sp)

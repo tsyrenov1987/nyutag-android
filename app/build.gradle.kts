@@ -17,7 +17,7 @@ android {
         minSdk = 29
         targetSdk = 36
         // Старый клиент (форк Element) в Play дошёл до 202609160: новый начинает с 300000000, чтобы встать поверх.
-        versionCode = 300000004
+        versionCode = 300000005
         versionName = "2.0"
         // Firebase без плагина google-services: те же четыре строки ресурсов, по ним FirebaseInitProvider
         // поднимает FCM сам. Файл не в git; без него сборка идёт, но пушей нет.

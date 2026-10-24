@@ -4,7 +4,6 @@
 
 package chat.nyutag.messenger.ui
 
-import android.app.Activity
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,11 +31,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import chat.nyutag.messenger.BuildConfig
 import chat.nyutag.messenger.session.AppSession
 
 @Composable
@@ -48,13 +45,6 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     var founding by rememberSaveable { mutableStateOf(false) }
     var grouping by rememberSaveable { mutableStateOf(false) }
     var meOpen by rememberSaveable { mutableStateOf(false) }
-    // В отладочной сборке окно ключа открывается и по extra ui_history_key: проверка неверным ключом на любом аккаунте.
-    val activity = LocalContext.current as? Activity
-    var keyOpen by rememberSaveable { mutableStateOf(BuildConfig.DEBUG && activity?.intent?.getBooleanExtra("ui_history_key", false) == true) }
-    if (keyOpen) {
-        HistoryKeyScreen(session) { keyOpen = false; activity?.intent?.removeExtra("ui_history_key") }
-        return
-    }
     if (inviting) {
         InviteScreen(session) { inviting = false }
         return
@@ -78,7 +68,7 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     Column(Modifier.fillMaxSize().background(palette.milk).safeDrawingPadding()) {
         Box(Modifier.weight(1f)) {
             when (tab) {
-                0 -> ChatListScreen(session, onOpen, onMe = { meOpen = true }, onHistoryKey = { keyOpen = true }, onNewGroup = { grouping = true })
+                0 -> ChatListScreen(session, onOpen, onMe = { meOpen = true }, onNewGroup = { grouping = true })
                 1 -> ContactsScreen(session, onOpen, onInvite = { inviting = true })
                 2 -> CommunitiesScreen(session, onCommunity = { onCommunity(it) }, onNew = { founding = true })
                 else -> CalendarScreen()

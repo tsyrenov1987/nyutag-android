@@ -8,10 +8,10 @@ sealed class PasswordUnlockOutcome {
     data class Opened(val imported: Int) : PasswordUnlockOutcome()
     /** Хранилища не было: завели его под этим паролем (и ключи кросс-подписи, если их не было на сервере). */
     object Created : PasswordUnlockOutcome() { override fun toString() = "Created" }
-    /** Хранилище заперто не этим паролем (старый случайный код или пароль сменили на другом устройстве). */
-    object NeedsRecoveryKey : PasswordUnlockOutcome() { override fun toString() = "NeedsRecoveryKey" }
-    /** Личность на сервере есть, хранилища нет, а у этого устройства закрытых ключей нет: подтвердить с другого устройства. */
-    object NeedsOtherDevice : PasswordUnlockOutcome() { override fun toString() = "NeedsOtherDevice" }
+    /** Хранилище было заперто не этим паролем (старый случайный ключ, пароль сменён через почту) или личность есть
+     *  без хранилища и без ключей на устройстве: завели новую личность и хранилище под паролем. Переписка под
+     *  прежним ключом не читается, дальше любой вход паролем поднимает историю. */
+    object Reset : PasswordUnlockOutcome() { override fun toString() = "Reset" }
 }
 
 /** Открыть или завести хранилище секретов паролем аккаунта. Вызывать после входа, пароль уже проверен сервером. */
@@ -21,14 +21,16 @@ suspend fun CryptoMachine.unlockWithPassword(
     try {
         defaultSecretStorageKey()
     } catch (e: E2EEException.NoBackup) {
-        if (!canStartIdentity()) return PasswordUnlockOutcome.NeedsOtherDevice
-        enableRecovery(password, passphrase = password, iterations = iterations)
-        return PasswordUnlockOutcome.Created
+        val fresh = canStartIdentity()
+        enableRecovery(password, resetIdentity = !fresh, passphrase = password, iterations = iterations)
+        return if (fresh) PasswordUnlockOutcome.Created else PasswordUnlockOutcome.Reset
     }
     val ssss = try {
         secretStorageKeyFromPassphrase(password)
     } catch (e: E2EEException.WrongRecoveryKey) {
-        return PasswordUnlockOutcome.NeedsRecoveryKey
+        // Владелец 23.10: ключ восстановления не спрашиваем никогда, вход паролем всегда сохраняет историю.
+        enableRecovery(password, resetIdentity = true, passphrase = password, iterations = iterations)
+        return PasswordUnlockOutcome.Reset
     }
     importCrossSigning(ssss)
     return PasswordUnlockOutcome.Opened(restoreBackupIfAny(ssss))

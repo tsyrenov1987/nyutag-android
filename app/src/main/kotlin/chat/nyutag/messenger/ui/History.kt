@@ -1,11 +1,8 @@
-// Нютаг. Старая история под прежним ключом: карточка над списком чатов и окно ввода ключа.
-// Ключ вводится один раз; дальше хранилище заперто паролем аккаунта, и на новых устройствах хватает пароля.
+// Нютаг. Карточка над списком чатов для установок, где старая версия заперла историю отдельным ключом.
+// Ключ больше не спрашиваем: новый вход паролем заводит хранилище под паролем, и дальше история сохраняется.
 
 package chat.nyutag.messenger.ui
 
-import android.content.ClipboardManager
-import android.content.Context
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -19,39 +16,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import chat.nyutag.messenger.BuildConfig
-import chat.nyutag.messenger.session.AppSession
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
-/** Карточка над списком: золотая полоска слева, ключ, по нажатию открывает окно ключа. */
+/** Карточка над списком: золотая полоска слева, ключ, по нажатию предлагает выйти и войти снова. */
 @Composable
 fun LockedHistoryCard(onOpen: () -> Unit) {
     val words = LocalWords.current
@@ -72,70 +50,6 @@ fun LockedHistoryCard(onOpen: () -> Unit) {
         }
     }
 }
-
-@Composable
-fun HistoryKeyScreen(session: AppSession, onClose: () -> Unit) {
-    val words = LocalWords.current
-    val palette = LocalPalette.current
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    // Пароль этого входа ещё в памяти: ключ перезапрёт хранилище, и дальше хватит пароля.
-    val canRelock = remember { session.canRelockHistory }
-    var key by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var failure by remember { mutableStateOf<AppSession.KeyFailure?>(null) }
-    var done by remember { mutableStateOf(false) }
-    val focus = remember { FocusRequester() }
-    val canSubmit = !busy && !done && key.count { !it.isWhitespace() } >= 8
-    BackHandler(onBack = onClose)
-    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-
-    fun submit() {
-        if (!canSubmit) return
-        busy = true
-        failure = null
-        scope.launch {
-            try {
-                session.openHistory(key)
-                done = true
-                busy = false
-                delay(1200)
-                onClose()
-            } catch (e: AppSession.KeyException) {
-                failure = e.failure
-                busy = false
-            }
-            if (BuildConfig.DEBUG) android.util.Log.d("ui-check", "ключ ${if (done) "принят" else if (failure == AppSession.KeyFailure.WRONG_KEY) "отклонён" else "ошибка $failure"}")
-        }
-    }
-
-    FormPage(words(P.historyLockedTitle), onClose, closeTitle = words(P.later)) {
-        Text(words(if (canRelock) P.historyKeyExplain else P.historyKeyExplainNoPassword), color = palette.quiet, fontSize = 15.sp)
-        FormCard {
-            TextField(key, { key = it }, Modifier.fillMaxWidth().focusRequester(focus), minLines = 2, maxLines = 4, colors = fieldColors(),
-                      placeholder = { Text(words(P.recoveryKey)) },
-                      textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 17.sp),
-                      keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false))
-            Text(words(P.paste), color = palette.sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                 modifier = Modifier.align(Alignment.End).clickable { paste(context)?.let { key = it } }.padding(horizontal = 16.dp, vertical = 10.dp))
-        }
-        failure?.let {
-            Text(words(if (it == AppSession.KeyFailure.WRONG_KEY) P.wrongKey else P.noNetwork), color = palette.ink, fontSize = 15.sp,
-                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(palette.gold.copy(alpha = 0.18f)).padding(12.dp))
-        }
-        if (done) Text("✓ " + words(P.historyOpened), color = palette.read, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).clip(RoundedCornerShape(18.dp))
-                .background(palette.sky.copy(alpha = if (canSubmit) 1f else 0.45f)).clickable(enabled = canSubmit, onClick = ::submit),
-            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
-            if (busy) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-            Text(words(if (busy) P.openingHistory else P.openHistory), color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-private fun paste(context: Context): String? =
-    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-        ?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
 
 /** Ключ лёжа: кольцо головки и бородка, как key.horizontal на iOS. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.key(color: Color, hole: Color) {

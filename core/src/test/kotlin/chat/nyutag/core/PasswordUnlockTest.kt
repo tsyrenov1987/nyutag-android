@@ -8,15 +8,18 @@ import chat.nyutag.core.crypto.bootstrapCrossSigning
 import chat.nyutag.core.crypto.devices
 import chat.nyutag.core.crypto.enableRecovery
 import chat.nyutag.core.crypto.importCrossSigning
+import chat.nyutag.core.crypto.markDeviceListsChanged
 import chat.nyutag.core.crypto.relockWithPassword
 import chat.nyutag.core.crypto.sendEncrypted
 import chat.nyutag.core.crypto.unlockWithPassword
+import chat.nyutag.core.crypto.uploadRoomKeysToBackup
 import chat.nyutag.core.sync.EventType
 import chat.nyutag.crypto.Random
 import chat.nyutag.crypto.RecoveryKey
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Test
 
 class PasswordUnlockTest {
@@ -40,29 +43,26 @@ class PasswordUnlockTest {
 
         val fresh = server.cryptoDevice(ALICE, "A2")
         assertEquals(listOf<String?>(null), server.read(fresh))
-        assertEquals(PasswordUnlockOutcome.NeedsRecoveryKey, fresh.machine.unlockWithPassword("чужой", iterations))
         assertEquals(PasswordUnlockOutcome.Opened(1), fresh.machine.unlockWithPassword("пароль-1", iterations))
         assertEquals(listOf("сайн байна"), server.read(fresh))
         assertEquals(true, alice.machine.devices(listOf(ALICE)).firstOrNull { it.deviceID == "A2" }?.crossSigned)
     }
 
-    @Test fun identityWithoutStorageNeedsOtherDevice() = runBlocking {
+    @Test fun identityWithoutStorageIsResetByPassword() = runBlocking {
         val server = FakeHomeserver()
         val old = server.cryptoDevice(ALICE, "A1")
         old.machine.bootstrapCrossSigning(null)
         val master = server.crossSigningKey(ALICE, "master")
 
         val fresh = server.cryptoDevice(ALICE, "A2")
-        assertEquals(PasswordUnlockOutcome.NeedsOtherDevice, fresh.machine.unlockWithPassword("pw", iterations))
-        assertEquals(master, server.crossSigningKey(ALICE, "master"))
-        assertNull(server.accountDataContent(ALICE, "m.secret_storage.default_key"))
-        // Устройство, у которого ключи есть, заводит хранилище под паролем, не меняя личность.
-        assertEquals(PasswordUnlockOutcome.Created, old.machine.unlockWithPassword("pw", iterations))
-        assertEquals(master, server.crossSigningKey(ALICE, "master"))
+        // Ключей личности на устройстве нет и подтвердить нечем: заводим новую личность под паролем.
+        assertEquals(PasswordUnlockOutcome.Reset, fresh.machine.unlockWithPassword("pw", iterations))
+        assertNotEquals(master, server.crossSigningKey(ALICE, "master"))
+        assertNotNull(server.accountDataContent(ALICE, "m.secret_storage.default_key"))
         assertEquals(PasswordUnlockOutcome.Opened(0), fresh.machine.unlockWithPassword("pw", iterations))
     }
 
-    @Test fun oldRandomCodeIsRelockedWithPassword() = runBlocking {
+    @Test fun oldRandomCodeIsResetAndPasswordKeepsNewHistory() = runBlocking {
         val server = FakeHomeserver()
         val alice = server.cryptoDevice(ALICE, "A1")
         val bob = server.cryptoDevice(BOB, "B1")
@@ -71,14 +71,21 @@ class PasswordUnlockTest {
         server.read(alice)
         val code = alice.machine.enableRecovery(null)
 
+        // Ключ восстановления не спрашиваем: переписка под ним пропадает, хранилище заводится под паролем.
         val fresh = server.cryptoDevice(ALICE, "A2")
-        assertEquals(PasswordUnlockOutcome.NeedsRecoveryKey, fresh.machine.unlockWithPassword("pw", iterations))
-        assertEquals(1, fresh.machine.relockWithPassword(code, "pw", iterations))
-        assertEquals(listOf("старое"), server.read(fresh))
+        assertEquals(PasswordUnlockOutcome.Reset, fresh.machine.unlockWithPassword("pw", iterations))
+        assertEquals(E2EEException.WrongRecoveryKey, runCatching { fresh.machine.restoreBackup(code) }.exceptionOrNull())
+        bob.machine.store.markDeviceListsChanged(listOf(ALICE))
+        bob.machine.sendEncrypted(TEST_ROOM, EventType.MESSAGE, text("новое"))
+        assertEquals("новое", server.read(fresh).last())
+        fresh.machine.uploadRoomKeysToBackup()
 
+        // Каждый следующий вход паролем поднимает всё, что было после сброса.
         val third = server.cryptoDevice(ALICE, "A3")
         assertEquals(PasswordUnlockOutcome.Opened(1), third.machine.unlockWithPassword("pw", iterations))
-        assertEquals(E2EEException.WrongRecoveryKey, runCatching { third.machine.restoreBackup(code) }.exceptionOrNull())
+        assertEquals("новое", server.read(third).last())
+        val fourth = server.cryptoDevice(ALICE, "A4")
+        assertEquals(PasswordUnlockOutcome.Opened(1), fourth.machine.unlockWithPassword("pw", iterations))
     }
 
     @Test fun wrongKeyChangesNothingAndKeyAloneOpensHistory() = runBlocking {
@@ -96,13 +103,11 @@ class PasswordUnlockTest {
                      runCatching { fresh.machine.relockWithPassword(other, "pw", iterations) }.exceptionOrNull())
         assertEquals(E2EEException.WrongRecoveryKey,
                      runCatching { fresh.machine.relockWithPassword("не ключ", "pw", iterations) }.exceptionOrNull())
-        assertEquals(PasswordUnlockOutcome.NeedsRecoveryKey, fresh.machine.unlockWithPassword("pw", iterations))
 
         // После перезапуска пароля в памяти нет: приложение только открывает хранилище ключом, без перезапирания.
         fresh.machine.secretStorageKey(code)
         fresh.machine.importCrossSigning(code)
         assertEquals(1, fresh.machine.restoreBackup(code).imported)
         assertEquals(listOf("старое"), server.read(fresh))
-        assertEquals(PasswordUnlockOutcome.NeedsRecoveryKey, fresh.machine.unlockWithPassword("pw", iterations))
     }
 }

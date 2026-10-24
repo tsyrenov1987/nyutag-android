@@ -72,8 +72,9 @@ class LiveServerTest {
             machine.publishKeys(null)
             assertTrue(machine.devices(listOf(session.userID)).any { it.deviceID == session.deviceID })
 
-            // Хранилище секретов под паролем: исход любой, но без ошибки и без смены личности. У test18 его на сервере
-            // нет (21.10: default_key M_NOT_FOUND, кросс-подпись есть) — ответ NeedsOtherDevice, аккаунт не трогаем.
+            // Хранилище секретов под паролем: исход любой, но без ошибки. У test18 его на сервере не было (21.10:
+            // default_key M_NOT_FOUND, кросс-подпись есть) — с 23.10 первый прогон заводит новую личность под паролем (Reset),
+            // следующие открывают её (Opened).
             val outcome = machine.unlockWithPassword(requireNotNull(password))
             println("live unlock: $outcome")
             if (outcome is PasswordUnlockOutcome.Opened) {

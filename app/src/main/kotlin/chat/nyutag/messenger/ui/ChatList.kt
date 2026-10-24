@@ -63,7 +63,6 @@ import chat.nyutag.core.push.PushPreview
 import chat.nyutag.core.rooms.ChatDigest
 import chat.nyutag.core.rooms.ChatLine
 import chat.nyutag.core.store.RoomRecord
-import chat.nyutag.core.crypto.PasswordUnlockOutcome
 import chat.nyutag.messenger.session.AppSession
 import java.time.Instant
 import java.time.LocalDate
@@ -73,22 +72,22 @@ import java.time.format.TextStyle
 import java.time.temporal.ChronoUnit
 
 @Composable
-fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Unit, onHistoryKey: () -> Unit, onNewGroup: () -> Unit) {
+fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Unit, onNewGroup: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val lines by session.lines.collectAsState()
     val typing by session.typing.collectAsState()
-    val history by session.history.collectAsState()
     val layout by session.layout.collectAsState()
     val mutedRooms by session.mutedRooms.collectAsState()
-    val locked = history == PasswordUnlockOutcome.NeedsRecoveryKey
+    val locked by session.historyNeedsSignIn.collectAsState()
     val myAvatar by session.myAvatar.collectAsState()
     var query by rememberSaveable { mutableStateOf("") }
     var hits by remember { mutableStateOf<List<SearchHit>>(emptyList()) }
     var folder by rememberSaveable { mutableStateOf<String?>(null) }
     var naming by remember { mutableStateOf<FolderNaming?>(null) }
     var deleting by remember { mutableStateOf<ChatFolder?>(null) }
+    var signingInAgain by remember { mutableStateOf(false) }
     var leaving by remember { mutableStateOf<String?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     if (folder != null && layout.folders.none { it.id == folder }) folder = null
@@ -115,7 +114,7 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
                   trailingIcon = if (query.isEmpty()) null else ({ Text("✕", color = palette.quiet, modifier = Modifier.clickable { query = "" }.padding(8.dp)) }),
                   colors = fieldColors(),
                   modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).clip(RoundedCornerShape(14.dp)))
-        if (locked) Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { LockedHistoryCard(onHistoryKey) }
+        if (locked) Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) { LockedHistoryCard { signingInAgain = true } }
         failure?.let { Box(Modifier.padding(horizontal = 12.dp)) { FailureNote(it) } }
         if (wanted.isNotEmpty()) {
             SearchResults(lines, hits, wanted, typing, words, onOpen) { hit -> session.focus(hit.roomID, hit.eventID); onOpen(hit.roomID) }
@@ -162,6 +161,13 @@ fun ChatListScreen(session: AppSession, onOpen: (String) -> Unit, onMe: () -> Un
                     text = { Text(words(P.folderDeleteHint), color = palette.quiet, fontSize = 15.sp) },
                     confirmButton = { TextButton({ deleting = null; session.deleteFolder(gone.id) }) { Text(words(P.folderDelete), color = Danger) } },
                     dismissButton = { TextButton({ deleting = null }) { Text(words(P.cancel), color = palette.sky) } })
+    }
+    if (signingInAgain) {
+        AlertDialog(onDismissRequest = { signingInAgain = false }, containerColor = palette.card,
+                    title = { Text(words(P.historyLockedTitle), color = palette.ink, fontSize = 17.sp) },
+                    text = { Text(words(P.historySignInAgain), color = palette.quiet, fontSize = 15.sp) },
+                    confirmButton = { TextButton({ signingInAgain = false; scope.launch { session.signOut() } }) { Text(words(P.signOut), color = Danger) } },
+                    dismissButton = { TextButton({ signingInAgain = false }) { Text(words(P.cancel), color = palette.sky) } })
     }
     leaving?.let { roomID ->
         LeaveDialog(session, roomID, onDismiss = { leaving = null }, onFailed = { failure = words(P.chatLeaveFailed) }, onLeft = {})

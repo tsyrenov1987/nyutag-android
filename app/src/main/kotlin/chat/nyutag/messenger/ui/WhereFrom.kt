@@ -40,6 +40,13 @@ object WhereFrom {
     fun done(context: Context) = prefs(context).edit().putBoolean(DONE, true).apply()
 
     private fun prefs(context: Context) = context.getSharedPreferences("nyutag.ui", Context.MODE_PRIVATE)
+
+    /** Открытые, но не земляческие: тестирование, Buriyad Gürün, iOS-чат. В «Откуда» их не показываем. */
+    val notNyutag = setOf(
+        "!VEj4gB4U9HZG_NGmOtFSjovtzTxwrnUpIQO_DDn90eA",
+        "!uMU-VoU8rMTIGdD2rDV0kwkc3fYfrSvWRSuhnjDnve4",
+        "!tQswEmiMYcV3nEMOPdlIVSc1UaZdyrCoW59WbUFIClk",
+    )
 }
 
 /** Каталог нютагов, крупные первыми. Открытый — вступаем сразу и открываем карточку, закрытый — карточка с заявкой. */
@@ -66,7 +73,7 @@ fun WhereFromScreen(session: AppSession, onCommunity: (String) -> Unit, onNew: (
         if (list == null) {
             Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         }
-        for (room in list.orEmpty()) {
+        for (room in list.orEmpty().filter { it.roomID !in WhereFrom.notNyutag }) {
             val community = Community.of(room)
             CommunityRow(community) {
                 if (joining != null) return@CommunityRow

@@ -159,7 +159,7 @@ fun CommunitiesScreen(session: AppSession, onCommunity: (String) -> Unit, onNew:
 }
 
 @Composable
-private fun CommunityRow(community: Community, onClick: () -> Unit) {
+internal fun CommunityRow(community: Community, onClick: () -> Unit) {
     val words = LocalWords.current
     val palette = LocalPalette.current
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.card).clickable(onClick = onClick).padding(12.dp),

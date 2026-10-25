@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,6 +33,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,6 +48,20 @@ fun HomeScreen(session: AppSession, tab: Int, onTab: (Int) -> Unit, community: S
     var founding by rememberSaveable { mutableStateOf(false) }
     var grouping by rememberSaveable { mutableStateOf(false) }
     var meOpen by rememberSaveable { mutableStateOf(false) }
+    var whereFrom by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val synced by session.revision.collectAsState()
+    LaunchedEffect(synced > 0) {
+        // После первого /sync список сообществ настоящий: кто уже в нютаге, того не спрашиваем.
+        if (synced == 0 || !WhereFrom.due(context)) return@LaunchedEffect
+        if (session.communities.value.isEmpty()) whereFrom = true else WhereFrom.done(context)
+    }
+    if (whereFrom) {
+        fun finish() { WhereFrom.done(context); whereFrom = false }
+        WhereFromScreen(session, onCommunity = { finish(); onTab(2); onCommunity(it) },
+                        onNew = { finish(); onTab(2); founding = true }, onClose = ::finish)
+        return
+    }
     if (inviting) {
         InviteScreen(session) { inviting = false }
         return

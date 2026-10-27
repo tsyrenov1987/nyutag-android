@@ -1,13 +1,16 @@
 // Нютаг. Конвейер видео одного звонка, как у iOS-клиента. Отправка: камера → H.264 → куски по 6 КБ → шифр → релей.
 // Приём: шифр → сборка кадра из кусков → декодер → экран. Видео идёт тем же каналом, что и голос, и не должно его
-// душить: пока в канале застряло много байт, новые кадры камеры не кодируются, а битрейт снижается.
+// душить: пока в канале застряло много байт, новые кадры камеры не кодируются, а битрейт снижается. Пробку дальше по
+// дороге (буферы дверей, медленный приём у собеседника) показывает задержка эха зондов (DelayGauge): растёт — битрейт
+// снижается, а на самом низком видео встаёт на паузу, пока путь не освободится. Голос при этом идёт.
 // Потерянный кусок (релей сбрасывает кадры медленному получателю) ломает цепочку кадров до следующего ключевого:
 // получатель просит его служебным кадром, не дожидаясь планового.
 //
 // Кадр H.264 на проводе: [флаги 1 байт: бит 0 — ключевой]; у ключевого дальше [число наборов параметров 1 байт] и
 // каждый набор как [длина 2 байта BE][байты] (SPS, PPS); затем единицы NAL в виде AVCC (длина 4 байта BE + байты).
 // Кусок: [номер кадра 2 байта BE][номер куска 1 байт][кусков в кадре 1 байт][байты кадра].
-// Служебный: [код 1 байт]: 1 — пришли ключевой кадр, 2 — камера выключена.
+// Служебный: [код 1 байт]: 1 — пришли ключевой кадр, 2 — камера выключена, 3 — зонд [метка 4 байта BE],
+// 4 — эхо зонда [та же метка]. Неизвестный код получатель пропускает: старые версии зонды не возвращают.
 // Кодек и камера — снаружи: в приложении MediaCodec и Camera2, в тестах на Маке — подделки.
 
 package chat.nyutag.core.calls
@@ -128,6 +131,10 @@ data class VideoStats(
     val brokenFrames: Int = 0,
     val keyRequestsSent: Int = 0,
     val keyRequestsReceived: Int = 0,
+    /** Задержка пути туда и обратно по эху зондов, мс; `null` — эха не было. */
+    val pathDelay: Long? = null,
+    /** Видео на паузе из-за пробки на пути к собеседнику. */
+    val paused: Boolean = false,
     val remoteWidth: Int = 0,
     val remoteHeight: Int = 0,
 )
@@ -145,6 +152,13 @@ class VideoPipe(
     private var cameraOnValue = false
     private var windowStart = System.nanoTime()
     private var windowSkipped = 0
+    private val gauge = DelayGauge()
+    /** Окон подряд на самом низком битрейте с пробкой. */
+    private var jammedAtFloor = 0
+    /** Окон подряд со свободным путём, пока видео на паузе. */
+    private var clearWhilePaused = 0
+    private var paused = false
+    private val epoch = System.nanoTime()
 
     private val incoming = Any()
     private var lastSequence: Long? = null
@@ -200,34 +214,69 @@ class VideoPipe(
     fun capture(picture: VideoPicture) {
         if (closed) return
         val now = System.nanoTime()
+        val ms = millis(now)
         val crowded = backlog() > BACKLOG_LIMIT
         var retune: Int? = null
-        val encoder = synchronized(outgoing) {
+        var probe: ByteArray? = null
+        var resumed = false
+        var pausedNow = false
+        val made = synchronized(outgoing) {
             if (!cameraOnValue || closed) return
             if (crowded) windowSkipped += 1
             if (now - windowStart >= 1_000_000_000L) {
                 val current = counters.bitRate
-                val next = when {
-                    windowSkipped > 2 -> maxOf(VideoFormat.MIN_BIT_RATE, current * 7 / 10)
-                    windowSkipped == 0 -> minOf(VideoFormat.MAX_BIT_RATE, current + 50_000)
-                    else -> current
+                val verdict = gauge.verdict(ms)
+                var next = current
+                if (windowSkipped > 2 || verdict == DelayGauge.Verdict.JAMMED) {
+                    next = maxOf(VideoFormat.MIN_BIT_RATE, current * 7 / 10)
+                    clearWhilePaused = 0
+                    // Самый низкий битрейт не помог: пауза, голосу весь путь.
+                    if (current == VideoFormat.MIN_BIT_RATE && verdict == DelayGauge.Verdict.JAMMED) {
+                        jammedAtFloor += 1
+                        if (jammedAtFloor >= 3) paused = true
+                    }
+                } else {
+                    jammedAtFloor = 0
+                    if (paused) {
+                        clearWhilePaused = if (verdict == DelayGauge.Verdict.CLEAR) clearWhilePaused + 1 else 0
+                        if (clearWhilePaused >= 3) {
+                            paused = false
+                            clearWhilePaused = 0
+                            resumed = true
+                        }
+                    } else if (windowSkipped == 0 && verdict != DelayGauge.Verdict.FAIR) {
+                        next = minOf(VideoFormat.MAX_BIT_RATE, current + 50_000)
+                    }
                 }
                 if (next != current) retune = next
                 windowStart = now
                 windowSkipped = 0
+                val delay = gauge.delay(ms)
+                val pausedState = paused
+                count { it.copy(pathDelay = delay, paused = pausedState) }
             }
+            gauge.probe(ms)?.let { stamp ->
+                probe = controlSealer.seal(FrameKind.CONTROL, byteArrayOf(CONTROL_PROBE.toByte()) + stampBytes(stamp))
+            }
+            pausedNow = paused
             encoder ?: codecs.encoder { ship(it) }?.also { made ->
                 made.setBitRate(counters.bitRate)
                 encoder = made
             }
-        } ?: return
+        }
+        probe?.let(send)
+        val encoder = made ?: return
         retune?.let { bitRate ->
             encoder.setBitRate(bitRate)
             count { it.copy(bitRate = bitRate) }
         }
-        if (crowded) return count { it.copy(skipped = it.skipped + 1) }
+        // После паузы у собеседника цепочка кадров порвана: начинаем с ключевого.
+        if (resumed) encoder.requestKeyframe()
+        if (crowded || pausedNow) return count { it.copy(skipped = it.skipped + 1) }
         encoder.encode(picture)
     }
+
+    private fun millis(nanos: Long) = (nanos - epoch) / 1_000_000L
 
     private fun ship(frame: VideoFrame) {
         val wire = frame.wire
@@ -253,8 +302,8 @@ class VideoPipe(
         count { it.copy(sentFrames = it.sentFrames + 1, sentKeyframes = it.sentKeyframes + if (frame.keyframe) 1 else 0) }
     }
 
-    private fun sendControl(code: Int) {
-        val packet = synchronized(outgoing) { controlSealer.seal(FrameKind.CONTROL, byteArrayOf(code.toByte())) }
+    private fun sendControl(code: Int, extra: ByteArray = ByteArray(0)) {
+        val packet = synchronized(outgoing) { controlSealer.seal(FrameKind.CONTROL, byteArrayOf(code.toByte()) + extra) }
         packet?.let(send)
     }
 
@@ -271,6 +320,12 @@ class VideoPipe(
                     synchronized(outgoing) { encoder }?.requestKeyframe()
                 }
                 CONTROL_CAMERA_OFF -> sink?.remoteCameraOff?.invoke()
+                // Сразу назад: задержка эха и есть мерка пути.
+                CONTROL_PROBE -> stampOf(opened.payload)?.let { sendControl(CONTROL_ECHO, stampBytes(it)) }
+                CONTROL_ECHO -> stampOf(opened.payload)?.let { stamp ->
+                    val now = millis(System.nanoTime())
+                    synchronized(outgoing) { gauge.echo(stamp, now) }
+                }
                 else -> {}
             }
             FrameKind.VIDEO -> take(opened.sequence, opened.payload)
@@ -369,5 +424,17 @@ class VideoPipe(
         const val BACKLOG_LIMIT = 96 shl 10
         private const val CONTROL_KEYFRAME = 1
         private const val CONTROL_CAMERA_OFF = 2
+        private const val CONTROL_PROBE = 3
+        private const val CONTROL_ECHO = 4
+
+        private fun stampBytes(stamp: Long) =
+            byteArrayOf((stamp shr 24).toByte(), (stamp shr 16).toByte(), (stamp shr 8).toByte(), stamp.toByte())
+
+        private fun stampOf(payload: ByteArray): Long? {
+            if (payload.size < 5) return null
+            var stamp = 0L
+            for (i in 1..4) stamp = (stamp shl 8) or (payload[i].toLong() and 0xFF)
+            return stamp
+        }
     }
 }

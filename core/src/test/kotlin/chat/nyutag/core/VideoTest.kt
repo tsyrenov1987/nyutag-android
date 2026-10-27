@@ -5,6 +5,7 @@ package chat.nyutag.core
 
 import chat.nyutag.core.calls.CallKeyPair
 import chat.nyutag.core.calls.CallSecret
+import chat.nyutag.core.calls.DelayGauge
 import chat.nyutag.core.calls.VideoCodecs
 import chat.nyutag.core.calls.VideoDecoder
 import chat.nyutag.core.calls.VideoEncoder
@@ -93,6 +94,71 @@ class VideoTest {
         sender.cameraOn = true
         sender.cameraOn = false
         assertTrue(off.get())
+    }
+
+    @Test fun delayGaugeJudgesByEcho() {
+        val gauge = DelayGauge()
+        // Эха не было (старая версия у собеседника) — судить не о чем.
+        assertEquals(0L, gauge.probe(0))
+        assertNull(gauge.probe(100))
+        assertEquals(DelayGauge.Verdict.UNKNOWN, gauge.verdict(2_000))
+        gauge.echo(0, 300)
+        assertEquals(300L, gauge.base)
+        assertEquals(DelayGauge.Verdict.CLEAR, gauge.verdict(400))
+        // Один зонд потерялся, следующий вернулся: потерянный больше не ждём.
+        gauge.probe(500)
+        gauge.echo(gauge.probe(1_000)!!, 1_350)
+        assertEquals(DelayGauge.Verdict.CLEAR, gauge.verdict(1_400))
+        // Эхо перестало приходить: возраст зонда растёт — пробка.
+        gauge.probe(1_500)
+        assertEquals(DelayGauge.Verdict.CLEAR, gauge.verdict(1_900))
+        assertEquals(DelayGauge.Verdict.FAIR, gauge.verdict(2_200))
+        assertEquals(DelayGauge.Verdict.JAMMED, gauge.verdict(2_400))
+        // Пришло с большой задержкой — пробка, пока за секунду нет эха быстрее.
+        gauge.echo(1_500, 2_500)
+        assertEquals(DelayGauge.Verdict.JAMMED, gauge.verdict(2_600))
+        gauge.echo(gauge.probe(2_600)!!, 2_900)
+        assertEquals(DelayGauge.Verdict.CLEAR, gauge.verdict(3_000))
+        // Чужая метка не считается.
+        gauge.echo(12_345, 3_100)
+        assertEquals(300L, gauge.base)
+    }
+
+    /**
+     * Эхо зондов стало опаздывать на 1,5 с: битрейт падает до низа и видео встаёт на паузу; путь освободился —
+     * видео снова идёт, с ключевого кадра. Своя очередь отправки при этом пуста.
+     */
+    @Test fun slowPathPausesVideo() {
+        val (callerSecret, calleeSecret) = pair("video-path-test")
+        val lag = AtomicInteger(0)
+        val timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+        var sender: VideoPipe? = null
+        val receiver = VideoPipe(calleeSecret, FakeCodecs, send = { packet ->
+            timer.schedule({ sender?.receive(packet) }, lag.get().toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        })
+        sender = VideoPipe(callerSecret, FakeCodecs, send = { receiver.receive(it) })
+        sender.cameraOn = true
+        val camera = PatternCamera()
+        camera.start(sender)
+        try {
+            until(4_000) { sender.stats.pathDelay != null }
+            lag.set(1_500)
+            until(15_000) { sender.stats.paused }
+            assertEquals(VideoFormat.MIN_BIT_RATE, sender.stats.bitRate)
+            val sent = sender.stats.sentFrames
+            Thread.sleep(1_000)
+            assertTrue(sender.stats.sentFrames <= sent + 1)
+            val keys = sender.stats.sentKeyframes
+            lag.set(0)
+            until(8_000) { !sender.stats.paused }
+            until(3_000) { sender.stats.sentKeyframes > keys }
+        } finally {
+            camera.stop()
+            timer.shutdownNow()
+            println("path test: ${sender.stats}")
+        }
+        sender.close()
+        receiver.close()
     }
 
     private fun pair(callID: String): Pair<CallSecret, CallSecret> {

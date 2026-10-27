@@ -64,7 +64,9 @@ class RelayLink private constructor(private val socket: Socket) : CallTransport 
     override val backlog: Int get() = unsent.get()
 
     override fun send(packet: ByteArray) {
-        if (closed.get()) return
+        // Сеть стоит: новые кадры выбрасываем, а не копим. Видео встаёт раньше (VideoPipe.BACKLOG_LIMIT), так что
+        // выбрасывается голос, который к доставке всё равно устарел бы.
+        if (closed.get() || unsent.get() >= SEND_LIMIT) return
         unsent.addAndGet(packet.size)
         queue.offer(Outgoing(OP_BINARY, packet))
     }
@@ -192,6 +194,8 @@ class RelayLink private constructor(private val socket: Socket) : CallTransport 
     companion object {
         const val PATH = "/_nyutag/relay/v1"
         const val MAX_MESSAGE = 256 shl 10
+        /** Больше этого в очереди на отправку — сеть стоит. */
+        const val SEND_LIMIT = 512 shl 10
         private const val PING_SECONDS = 15L
         /** Без единого байта столько — связь мертва: на наш ping релей отвечает pong каждые 15 с. */
         private const val READ_TIMEOUT_MILLIS = 45_000
